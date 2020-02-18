@@ -15,26 +15,9 @@ import (
 const (
 	typeBool   byte = 1
 	typeInt         = 2
-	typeLong        = 3
-	typeDouble      = 4
-	typeString      = 5
-	typeLink        = 6
+	typeFloat       = 3
+	typeString      = 4
 )
-
-// Link represents a reference to a different key
-type Link string
-
-const maxLinkDepth = 5
-
-const maxUint32 = ^uint32(0)
-const minUint32 = 0
-const maxInt32 = int(maxUint32 >> 1)
-const minInt32 = -maxInt32 - 1
-
-func abs(n int64) int64 { // http://cavaliercoder.com/blog/optimized-abs-for-int64-in-go.html
-	y := n >> 63       // y ← x ⟫ 63
-	return (n ^ y) - y // (x ⨁ y) - y
-}
 
 func fromBadgerType(val []byte) (interface{}, error) {
 	if val == nil || len(val) == 0 {
@@ -47,30 +30,47 @@ func fromBadgerType(val []byte) (interface{}, error) {
 		}
 		return val[1] != 0, nil
 	case typeInt:
-		if len(val) < 5 {
-			return nil, errors.New("data too short")
+		switch len(val) {
+		case 10:
+			// just assume this is a ulong that might exceed long limits, can't really do anything else
+			return binary.LittleEndian.Uint64(val[1:9]), nil
+		case 9, 8, 7, 6:
+			bits := val[1:]
+			if bits[len(bits)-1] >= 0x80 {
+				bits = append(bits, 0xff, 0xff, 0xff)[:8]
+			} else {
+				bits = append(bits, 0, 0, 0)[:8]
+			}
+			return int64(binary.LittleEndian.Uint64(bits)), nil
+		case 5, 4, 3, 2:
+			bits := val[1:]
+			if bits[len(bits)-1] >= 0x80 {
+				bits = append(bits, 0xff, 0xff, 0xff)[:8]
+			} else {
+				bits = append(bits, 0, 0, 0)[:8]
+			}
+			return int32(binary.LittleEndian.Uint32(bits)), nil
+		default:
+			return nil, errors.New("unexpected data length")
 		}
-		return int(binary.LittleEndian.Uint32(val[1:5])), nil
-	case typeLong:
-		if len(val) < 9 {
-			return nil, errors.New("data too short")
+	case typeFloat:
+		switch len(val) {
+		case 5:
+			return math.Float32frombits(binary.LittleEndian.Uint32(val[1:9])), nil
+		case 9:
+			return math.Float64frombits(binary.LittleEndian.Uint64(val[1:9])), nil
+		default:
+			return nil, errors.New("unexpected data length")
 		}
-		return int64(binary.LittleEndian.Uint64(val[1:9])), nil
-	case typeDouble:
-		if len(val) < 9 {
-			return nil, errors.New("data too short")
-		}
-		return math.Float64frombits(binary.LittleEndian.Uint64(val[1:9])), nil
 	case typeString:
 		return string(val[1:]), nil
-	case typeLink:
-		return Link(val[1:]), nil
 	default:
 		return nil, fmt.Errorf("Unexpected datatype: %d", val[0])
 	}
 }
 
-func toBadgerType(val interface{}) ([]byte, error) {
+// ToBadgerType convert the specified scalar into something stored in a Badger KV store
+func ToBadgerType(val interface{}) ([]byte, error) {
 	switch v := val.(type) {
 	case bool:
 		ret := make([]byte, 2)
@@ -89,28 +89,31 @@ func toBadgerType(val interface{}) ([]byte, error) {
 			}
 			bits := make([]byte, 8)
 			binary.LittleEndian.PutUint64(bits, math.Float64bits(num))
-			ret := append([]byte{typeDouble}, bits...)
+			ret := append([]byte{typeFloat}, bits...)
 			return ret, nil
 		}
 		num, err := strconv.ParseInt(string(v), 10, 64)
 		if err != nil {
-			return nil, err
-		}
-		if abs(num) < int64(maxInt32) {
-			bits := make([]byte, 4)
-			binary.LittleEndian.PutUint32(bits, uint32(num))
-			ret := append([]byte{typeInt}, bits...)
+			unum, err := strconv.ParseUint(string(v), 10, 64)
+			if err != nil {
+				return nil, err
+			}
+			// okay this is a *big* number that can only be stored as an unsigned long
+			bits := make([]byte, 8)
+			binary.LittleEndian.PutUint64(bits, unum)
+			ret := append(append([]byte{typeInt}, bits...), 0)
 			return ret, nil
 		}
+
 		bits := make([]byte, 8)
 		binary.LittleEndian.PutUint64(bits, uint64(num))
-		ret := append([]byte{typeLong}, bits...)
+		for len(bits) > 1 && (bits[len(bits)-1] == 0 && bits[len(bits)-2] < 0x80) || (bits[len(bits)-1] == 0xFF && bits[len(bits)-2] >= 0x80) {
+			bits = bits[:len(bits)-1]
+		}
+		ret := append([]byte{typeInt}, bits...)
 		return ret, nil
 	case string:
 		ret := append([]byte{typeString}, []byte(v)...)
-		return ret, nil
-	case Link:
-		ret := append([]byte{typeLink}, []byte(v)...)
 		return ret, nil
 	case nil:
 		return nil, nil
@@ -119,7 +122,8 @@ func toBadgerType(val interface{}) ([]byte, error) {
 	}
 }
 
-func getBadgerValImpl(txn *badger.Txn, key string, maxDepth int) (interface{}, error) {
+// GetBadgerVal retrieve the specified key as a scalar from a Badger KV store
+func GetBadgerVal(txn *badger.Txn, key string) (interface{}, error) {
 	item, err := txn.Get([]byte(key))
 	if err != nil {
 		if err == badger.ErrKeyNotFound {
@@ -133,21 +137,10 @@ func getBadgerValImpl(txn *badger.Txn, key string, maxDepth int) (interface{}, e
 		if err != nil {
 			return err
 		}
-		if link, ok := iVal.(Link); ok {
-			if maxDepth == 0 {
-				return errors.New("Links nested too deeply")
-			}
-			result, err = getBadgerValImpl(txn, string(link), maxDepth-1)
-			return err
-		}
 		result = iVal
 		return nil
 	})
 	return result, err
-}
-
-func getBadgerVal(txn *badger.Txn, key string) (interface{}, error) {
-	return getBadgerValImpl(txn, key, maxLinkDepth)
 }
 
 func storeDenseKey(store map[string]interface{}, key string, val interface{}) {
@@ -170,13 +163,16 @@ func storeDenseKey(store map[string]interface{}, key string, val interface{}) {
 	storeDenseKey(subMap, body, val)
 }
 
-func getBadgerTreeImpl(txn *badger.Txn, key string, maxDepth int) (interface{}, error) {
+// GetBadgerTree retrieve the specified key as a scalar or subtree from a Badger KV store
+func GetBadgerTree(txn *badger.Txn, key string) (interface{}, error) {
 	item, err := txn.Get([]byte(key))
 	if err != nil {
 		if err != badger.ErrKeyNotFound {
+			// some error happened, just fail out now
 			return nil, err
 		}
 		val := map[string]interface{}{}
+		foundOne := false
 		iter := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer iter.Close()
 		prefix := append([]byte(key), byte('/'))
@@ -194,19 +190,17 @@ func getBadgerTreeImpl(txn *badger.Txn, key string, maxDepth int) (interface{}, 
 				return nil, err
 			}
 		}
-		return val, nil
+		if foundOne {
+			return val, nil // we found an object with nested values, return it
+		}
+		return nil, nil // didn't find anything, just return empty
 	}
+
+	// we found a single value, return it
 	var result interface{}
 	err = item.Value(func(val []byte) error {
 		iVal, err := fromBadgerType(val)
 		if err != nil {
-			return err
-		}
-		if link, ok := iVal.(Link); ok {
-			if maxDepth == 0 {
-				return errors.New("Links nested too deeply")
-			}
-			result, err = getBadgerValImpl(txn, string(link), maxDepth-1)
 			return err
 		}
 		result = iVal
