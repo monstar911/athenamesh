@@ -4,16 +4,23 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/dgraph-io/badger"
 	abcitypes "github.com/tendermint/tendermint/abci/types"
 )
 
+type treeStateData struct {
+	lastBlockHeight int64
+	lastBlockHash   []byte
+}
+
 // AthenaStoreApplication defines our blockchain application and its behavior
 type AthenaStoreApplication struct {
 	db           *badger.DB
 	currentBatch *badger.Txn
+	treeState    treeStateData
 }
 
 type athenaTx struct {
@@ -23,51 +30,101 @@ type athenaTx struct {
 }
 
 const (
-	// ERR_Ok no error
-	ERR_Ok = iota
-	// ERR_TxTooShort the transaction does not include the minimum pk + signature
-	ERR_TxTooShort
-	// ERR_TxBadJson the body of the transaction is not well-formed
-	ERR_TxBadJson
-	// ERR_TxBadSign the signature of this transaction does not match the PKey
-	ERR_TxBadSign
+	// ErrorOk no error
+	ErrorOk = iota
+	// ErrorTxTooShort the transaction does not include the minimum pk + signature
+	ErrorTxTooShort
+	// ErrorTxBadJSON the body of the transaction is not well-formed
+	ErrorTxBadJSON
+	// ErrorTxBadSign the signature of this transaction does not match the PKey
+	ErrorTxBadSign
 )
 
 var _ abcitypes.Application = (*AthenaStoreApplication)(nil)
 
 // NewAthenaStoreApplication create a new instance of AthenaStoreApplication
-func NewAthenaStoreApplication() *AthenaStoreApplication {
-	return &AthenaStoreApplication{}
+func NewAthenaStoreApplication(db *badger.DB) *AthenaStoreApplication {
+	app := &AthenaStoreApplication{db: db}
+	app.init()
+	return app
+}
+
+func (app *AthenaStoreApplication) loadTreeState() error {
+	// load our current status
+	return app.db.View(func(txn *badger.Txn) error {
+		val, err := GetBadgerTree(txn, "!")
+		if err != nil {
+			return err
+		}
+		if val == nil {
+			// brand new KV store, use defaults
+			return nil
+		}
+		if iVal, ok := val.(map[string]interface{}); ok {
+			if lbh, ok := iVal["lastBlockHeight"]; ok {
+				if iLbh, ok := NumberToInt64(lbh); ok {
+					app.treeState.lastBlockHeight = iLbh
+				} else {
+					return fmt.Errorf("Unexpected lastBlockHeight querying the tree state: %v", lbh)
+				}
+			}
+			if lbh, ok := iVal["lastBlockHash"]; ok {
+				if bLbh, ok := lbh.([]byte); ok {
+					app.treeState.lastBlockHash = bLbh
+				} else {
+					return fmt.Errorf("Unexpected lastBlockHash querying the tree state: %v", lbh)
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("Unexpected value querying the tree state: %v", val)
+	})
+}
+
+func (app *AthenaStoreApplication) init() {
+	// load our current status
+	err := app.loadTreeState()
+	if err != nil {
+		panic("Unexpected error on loading tree state: " + err.Error())
+	}
+}
+
+// Info Return information about the application state
+func (app *AthenaStoreApplication) Info(req abcitypes.RequestInfo) abcitypes.ResponseInfo {
+	return abcitypes.ResponseInfo{
+		LastBlockHeight:  app.treeState.lastBlockHeight,
+		LastBlockAppHash: app.treeState.lastBlockHash,
+	}
 }
 
 func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, string) {
 	dec := athenaTx{}
 	if len(tx) < 96 {
-		return nil, ERR_TxTooShort, "Tx too short"
+		return nil, ErrorTxTooShort, "Tx too short"
 	}
 	dec.Pkey = tx[0:32]
 	dec.Sign = tx[32:96]
 
 	body := tx[96:]
 	if !ed25519.Verify(dec.Pkey, body, dec.Sign) {
-		return nil, ERR_TxBadSign, "Transaction signature invalid"
+		return nil, ErrorTxBadSign, "Transaction signature invalid"
 	}
 
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.UseNumber()
 	var json interface{}
 	if err := decoder.Decode(&json); err != nil {
-		return nil, ERR_TxBadJson, err.Error()
+		return nil, ErrorTxBadJSON, err.Error()
 	}
 	var ok bool
 	if dec.Msg, ok = json.(map[string]interface{}); !ok {
-		return nil, ERR_TxBadJson, "Transaction must not be a JSON literal"
+		return nil, ErrorTxBadJSON, "Transaction must not be a JSON literal"
 	}
 
-	return &dec, ERR_Ok, ""
+	return &dec, ErrorOk, ""
 }
 
-func (app *AthenaStoreApplication) isValid(tx *athenaTx) (code uint32, codeContext string, codeDescr string) {
+func (app *AthenaStoreApplication) isValid(tx *athenaTx) (code uint32, codeDescr string) {
 	//key, value := parts[0], parts[1]
 
 	// check if the same key=value already exists
@@ -80,7 +137,6 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx) (code uint32, codeConte
 			return item.Value(func(val []byte) error {
 				if bytes.Equal(val, value) {
 					code = 2
-					codeContext = "athena"
 					codeDescr = "key already exists"
 				}
 				return nil
@@ -89,15 +145,10 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx) (code uint32, codeConte
 		return nil
 	})
 	if err != nil {
-		return 2, "badger", err.Error()
+		return 2, err.Error()
 	}
 
-	return code, codeContext, codeDescr
-}
-
-// Info Return information about the application state
-func (app *AthenaStoreApplication) Info(req abcitypes.RequestInfo) abcitypes.ResponseInfo {
-	return abcitypes.ResponseInfo{}
+	return code, codeDescr
 }
 
 // SetOption Set non-consensus critical application specific options
@@ -111,9 +162,9 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, codeContext, info := app.isValid(tx)
+	code, info = app.isValid(tx)
 	if code != 0 {
-		return abcitypes.ResponseDeliverTx{Code: code, Codespace: codeContext, Info: info}
+		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
 
 	return abcitypes.ResponseDeliverTx{Code: 0}
@@ -125,9 +176,9 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, codeContext, info := app.isValid(tx)
+	code, info = app.isValid(tx)
 	if code != 0 {
-		return abcitypes.ResponseCheckTx{Code: code, Codespace: codeContext, Info: info}
+		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
 	return abcitypes.ResponseCheckTx{Code: 0, GasWanted: 1}
 }

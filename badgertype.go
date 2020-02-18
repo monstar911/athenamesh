@@ -19,6 +19,100 @@ const (
 	typeString      = 4
 )
 
+// NumberToUint64 attempts to convert numeric val to a uint64
+func NumberToUint64(val interface{}) (uint64, bool) {
+	switch v := val.(type) {
+	case uint64:
+		return v, true
+	case int64:
+		if v < 0 {
+			return uint64(v), false
+		}
+		return uint64(v), true
+	case int32:
+		if v < 0 {
+			return uint64(v), false
+		}
+		return uint64(v), true
+	case uint32:
+		return uint64(v), true
+	case int:
+		if v < 0 {
+			return uint64(v), false
+		}
+		return uint64(v), true
+	case uint:
+		return uint64(v), true
+	}
+	return 0, false
+}
+
+// NumberToInt64 attempts to convert numeric val to an int64
+func NumberToInt64(val interface{}) (int64, bool) {
+	switch v := val.(type) {
+	case uint64:
+		return int64(v), true
+	case int64:
+		return int64(v), true
+	case int32:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case int:
+		return int64(v), true
+	case uint:
+		return int64(v), true
+	}
+	return 0, false
+}
+
+// NumberToUint attempts to convert numeric val to a uint
+func NumberToUint(val interface{}) (uint, bool) {
+	switch v := val.(type) {
+	case uint64:
+		return uint(v), true
+	case int64:
+		if v < 0 {
+			return uint(v), false
+		}
+		return uint(v), true
+	case int32:
+		if v < 0 {
+			return uint(v), false
+		}
+		return uint(v), true
+	case uint32:
+		return uint(v), true
+	case int:
+		if v < 0 {
+			return uint(v), false
+		}
+		return uint(v), true
+	case uint:
+		return v, true
+	}
+	return 0, false
+}
+
+// NumberToInt attempts to convert numeric val to an int
+func NumberToInt(val interface{}) (int, bool) {
+	switch v := val.(type) {
+	case uint64:
+		return int(v), true
+	case int64:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case uint32:
+		return int(v), true
+	case int:
+		return int(v), true
+	case uint:
+		return int(v), true
+	}
+	return 0, false
+}
+
 func fromBadgerType(val []byte) (interface{}, error) {
 	if val == nil || len(val) == 0 {
 		return nil, errors.New("cannot interpret empty string")
