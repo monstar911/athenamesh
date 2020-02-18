@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -16,11 +15,17 @@ type treeStateData struct {
 	lastBlockHash   []byte
 }
 
+type userTypeConfig struct {
+	UsePassphrase bool
+	Parent        *userTypeConfig
+}
+
 // AthenaStoreApplication defines our blockchain application and its behavior
 type AthenaStoreApplication struct {
 	db           *badger.DB
 	currentBatch *badger.Txn
 	treeState    treeStateData
+	userConfig   map[string]*userTypeConfig
 }
 
 type athenaTx struct {
@@ -81,12 +86,110 @@ func (app *AthenaStoreApplication) loadTreeState() error {
 	})
 }
 
+func (app *AthenaStoreApplication) loadConfig() (map[string]*userTypeConfig, error) {
+	// (re-)load our operating configuration
+	userTypes := make(map[string]*userTypeConfig)
+	err := app.db.View(func(txn *badger.Txn) error {
+		entry, err := GetBadgerTree(txn, "config/userTypes")
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			// brand new KV store.  This... doesn't seem to be the place to populate defaults, but we can't operate without it
+			userTypes = nil
+			return nil
+		}
+		if iEntry, ok := entry.(map[string]interface{}); ok {
+			for key, val := range iEntry {
+				if _, ok = userTypes[key]; ok {
+					return fmt.Errorf("unexpected duplicate user config %s", key)
+				}
+				if iVal, ok := val.(map[string]interface{}); ok {
+					thisType := &userTypeConfig{}
+					userTypes[key] = thisType
+					if uPP, ok := iVal["usePassphrase"]; ok {
+						if bUPP, ok := uPP.(bool); ok {
+							thisType.UsePassphrase = bUPP
+						} else {
+							return fmt.Errorf("Unexpected value querying user config %s.usePassphrase: %v", key, uPP)
+						}
+					}
+					if parent, ok := iVal["parent"]; ok {
+						if sParent, ok := parent.(string); ok {
+							if sParentType, ok := userTypes[sParent]; ok {
+								thisType.Parent = sParentType
+							} else {
+								return fmt.Errorf("Could not locate parent type %s referenced in user config %s", sParent, key)
+							}
+						} else {
+							return fmt.Errorf("Unexpected value querying user config %s.parent: %v", key, parent)
+						}
+					}
+				} else {
+					return fmt.Errorf("Unexpected value querying user config %s: %v", key, val)
+				}
+			}
+			return nil
+		}
+		return fmt.Errorf("Unexpected value querying user config: %v", entry)
+	})
+	return userTypes, err
+}
+
+func storeDefaultConfigImpl(txn *badger.Txn, src map[string]interface{}, dest string) error {
+	for key, val := range src {
+		var err error = nil
+		subkey := fmt.Sprintf("%s/%s", dest, key)
+		switch v := val.(type) {
+		case map[string]interface{}:
+			err = storeDefaultConfigImpl(txn, v, subkey)
+		default:
+			var bval []byte
+			bval, err = ToBadgerType(v)
+			if err != nil {
+				err = txn.Set([]byte(subkey), bval)
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (app *AthenaStoreApplication) storeDefaultConfig() error {
+	return app.db.Update(func(txn *badger.Txn) error {
+		if config, ok := DefaultConfig.(map[string]interface{}); ok {
+			return storeDefaultConfigImpl(txn, config, "config")
+		}
+		return fmt.Errorf("Unexpected value trying to store default configuration: %v", DefaultConfig)
+	})
+}
+
 func (app *AthenaStoreApplication) init() {
 	// load our current status
 	err := app.loadTreeState()
 	if err != nil {
 		panic("Unexpected error on loading tree state: " + err.Error())
 	}
+	userTypes, err := app.loadConfig()
+	if err != nil {
+		panic("Unexpected error on loading config: " + err.Error())
+	}
+	if userTypes == nil {
+		err = app.storeDefaultConfig()
+		if err != nil {
+			panic("Unexpected error populating default config: " + err.Error())
+		}
+		userTypes, err = app.loadConfig()
+		if err != nil {
+			panic("Unexpected error on loading config: " + err.Error())
+		}
+		if userTypes == nil {
+			panic("Unable to populate default config")
+		}
+	}
+	app.userConfig = userTypes
 }
 
 // Info Return information about the application state
@@ -128,27 +231,28 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx) (code uint32, codeDescr
 	//key, value := parts[0], parts[1]
 
 	// check if the same key=value already exists
-	err := app.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(key)
-		if err != nil && err != badger.ErrKeyNotFound {
-			return err
+	/*	err := app.db.View(func(txn *badger.Txn) error {
+			item, err := txn.Get(key)
+			if err != nil && err != badger.ErrKeyNotFound {
+				return err
+			}
+			if err == nil {
+				return item.Value(func(val []byte) error {
+					if bytes.Equal(val, value) {
+						code = 2
+						codeDescr = "key already exists"
+					}
+					return nil
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			return 2, err.Error()
 		}
-		if err == nil {
-			return item.Value(func(val []byte) error {
-				if bytes.Equal(val, value) {
-					code = 2
-					codeDescr = "key already exists"
-				}
-				return nil
-			})
-		}
-		return nil
-	})
-	if err != nil {
-		return 2, err.Error()
-	}
 
-	return code, codeDescr
+		return code, codeDescr*/
+	return 0, ""
 }
 
 // SetOption Set non-consensus critical application specific options

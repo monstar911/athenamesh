@@ -4,5 +4,7 @@
 			"path": "."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"go.toolsEnvVars": {"CGO_ENABLED":"0"}
+	}
 }
