@@ -2,8 +2,10 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/dgraph-io/badger"
@@ -18,6 +20,51 @@ type treeStateData struct {
 type userTypeConfig struct {
 	UsePassphrase bool
 	Parent        *userTypeConfig
+	PathPat       *regexp.Regexp
+}
+
+var adminUserTypeConfig = &userTypeConfig{
+	UsePassphrase: false,
+	PathPat:       regexp.MustCompile("^config/rootUser$"),
+}
+
+var userUserTypeConfig = &userTypeConfig{
+	UsePassphrase: true,
+	PathPat:       regexp.MustCompile("^user/[^/]+$"),
+}
+
+var loginUserTypeConfig = &userTypeConfig{
+	UsePassphrase: false,
+	Parent:        userUserTypeConfig,
+	PathPat:       regexp.MustCompile("^(user/[^/]+)/login/[^/]+$"),
+}
+
+var domainUserTypeConfig = &userTypeConfig{
+	UsePassphrase: false,
+	Parent:        userUserTypeConfig,
+	PathPat:       regexp.MustCompile("^(user/[^/]+)/domain/[^/]+$"),
+}
+
+type domainUserTypeStore struct {
+	userTypes []*userTypeConfig
+}
+
+var domainUserTypes = &domainUserTypeStore{
+	userTypes: []*userTypeConfig{adminUserTypeConfig, userUserTypeConfig, loginUserTypeConfig, domainUserTypeConfig},
+}
+
+func (app *domainUserTypeStore) MatchFromPath(path string) (*userTypeConfig, string) {
+	for _, typ := range app.userTypes {
+		matches := typ.PathPat.FindStringSubmatch(path)
+		if matches != nil {
+			parentPath := ""
+			if len(matches) > 1 {
+				parentPath = matches[1]
+			}
+			return typ, parentPath
+		}
+	}
+	return nil, ""
 }
 
 // AthenaStoreApplication defines our blockchain application and its behavior
@@ -25,7 +72,6 @@ type AthenaStoreApplication struct {
 	db           *badger.DB
 	currentBatch *badger.Txn
 	treeState    treeStateData
-	userConfig   map[string]*userTypeConfig
 }
 
 type athenaTx struct {
@@ -43,6 +89,10 @@ const (
 	ErrorTxBadJSON
 	// ErrorTxBadSign the signature of this transaction does not match the PKey
 	ErrorTxBadSign
+	// ErrorUnexpected an unexpected condition was encountered
+	ErrorUnexpected
+	// ErrorUnknownUser did not recognize the public key
+	ErrorUnknownUser
 )
 
 var _ abcitypes.Application = (*AthenaStoreApplication)(nil)
@@ -86,54 +136,51 @@ func (app *AthenaStoreApplication) loadTreeState() error {
 	})
 }
 
-func (app *AthenaStoreApplication) loadConfig() (map[string]*userTypeConfig, error) {
+/*
+func (app *AthenaStoreApplication) loadConfig(txn *badger.Txn) (map[string]*userTypeConfig, error) {
 	// (re-)load our operating configuration
-	userTypes := make(map[string]*userTypeConfig)
-	err := app.db.View(func(txn *badger.Txn) error {
-		entry, err := GetBadgerTree(txn, "config/userTypes")
-		if err != nil {
-			return err
-		}
-		if entry == nil {
-			// brand new KV store.  This... doesn't seem to be the place to populate defaults, but we can't operate without it
-			userTypes = nil
-			return nil
-		}
-		if iEntry, ok := entry.(map[string]interface{}); ok {
-			for key, val := range iEntry {
-				if _, ok = userTypes[key]; ok {
-					return fmt.Errorf("unexpected duplicate user config %s", key)
-				}
-				if iVal, ok := val.(map[string]interface{}); ok {
-					thisType := &userTypeConfig{}
-					userTypes[key] = thisType
-					if uPP, ok := iVal["usePassphrase"]; ok {
-						if bUPP, ok := uPP.(bool); ok {
-							thisType.UsePassphrase = bUPP
-						} else {
-							return fmt.Errorf("Unexpected value querying user config %s.usePassphrase: %v", key, uPP)
-						}
-					}
-					if parent, ok := iVal["parent"]; ok {
-						if sParent, ok := parent.(string); ok {
-							if sParentType, ok := userTypes[sParent]; ok {
-								thisType.Parent = sParentType
-							} else {
-								return fmt.Errorf("Could not locate parent type %s referenced in user config %s", sParent, key)
-							}
-						} else {
-							return fmt.Errorf("Unexpected value querying user config %s.parent: %v", key, parent)
-						}
-					}
-				} else {
-					return fmt.Errorf("Unexpected value querying user config %s: %v", key, val)
-				}
+	entry, err := GetBadgerTree(txn, "config/userTypes")
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		// brand new KV store.  This... doesn't seem to be the place to populate defaults, but we can't operate without it
+		return nil, nil
+	}
+	if iEntry, ok := entry.(map[string]interface{}); ok {
+		userTypes := make(map[string]*userTypeConfig)
+		for key, val := range iEntry {
+			if _, ok = userTypes[key]; ok {
+				return nil, fmt.Errorf("unexpected duplicate user config %s", key)
 			}
-			return nil
+			if iVal, ok := val.(map[string]interface{}); ok {
+				thisType := &userTypeConfig{}
+				userTypes[key] = thisType
+				if uPP, ok := iVal["usePassphrase"]; ok {
+					if bUPP, ok := uPP.(bool); ok {
+						thisType.UsePassphrase = bUPP
+					} else {
+						return nil, fmt.Errorf("Unexpected value querying user config %s.usePassphrase: %v", key, uPP)
+					}
+				}
+				if parent, ok := iVal["parent"]; ok {
+					if sParent, ok := parent.(string); ok {
+						if sParentType, ok := userTypes[sParent]; ok {
+							thisType.Parent = sParentType
+						} else {
+							return nil, fmt.Errorf("Could not locate parent type %s referenced in user config %s", sParent, key)
+						}
+					} else {
+						return nil, fmt.Errorf("Unexpected value querying user config %s.parent: %v", key, parent)
+					}
+				}
+			} else {
+				return nil, fmt.Errorf("Unexpected value querying user config %s: %v", key, val)
+			}
 		}
-		return fmt.Errorf("Unexpected value querying user config: %v", entry)
-	})
-	return userTypes, err
+		return userTypes, nil
+	}
+	return nil, fmt.Errorf("Unexpected value querying user config: %v", entry)
 }
 
 func storeDefaultConfigImpl(txn *badger.Txn, src map[string]interface{}, dest string) error {
@@ -165,14 +212,19 @@ func (app *AthenaStoreApplication) storeDefaultConfig() error {
 		return fmt.Errorf("Unexpected value trying to store default configuration: %v", DefaultConfig)
 	})
 }
-
+*/
 func (app *AthenaStoreApplication) init() {
 	// load our current status
 	err := app.loadTreeState()
 	if err != nil {
 		panic("Unexpected error on loading tree state: " + err.Error())
 	}
-	userTypes, err := app.loadConfig()
+	/*var userTypes map[string]*userTypeConfig
+	err = app.db.View(func(txn *badger.Txn) error {
+		var err error
+		userTypes, err = app.loadConfig(txn)
+		return err
+	})
 	if err != nil {
 		panic("Unexpected error on loading config: " + err.Error())
 	}
@@ -181,7 +233,11 @@ func (app *AthenaStoreApplication) init() {
 		if err != nil {
 			panic("Unexpected error populating default config: " + err.Error())
 		}
-		userTypes, err = app.loadConfig()
+		err = app.db.View(func(txn *badger.Txn) error {
+			var err error
+			userTypes, err = app.loadConfig(txn)
+			return err
+		})
 		if err != nil {
 			panic("Unexpected error on loading config: " + err.Error())
 		}
@@ -189,7 +245,7 @@ func (app *AthenaStoreApplication) init() {
 			panic("Unable to populate default config")
 		}
 	}
-	app.userConfig = userTypes
+	app.userConfig = userTypes*/
 }
 
 // Info Return information about the application state
@@ -227,7 +283,53 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	return &dec, ErrorOk, ""
 }
 
-func (app *AthenaStoreApplication) isValid(tx *athenaTx) (code uint32, codeDescr string) {
+func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (interface{}, uint32, string) {
+
+	err := app.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(append([]byte("keys/"), []byte(base64.RawStdEncoding.EncodeToString(tx.Pkey))...))
+		if err != nil {
+			if err != badger.ErrKeyNotFound {
+				return err // some error happened, just fail out now
+			}
+			return nil // no key found
+		}
+		keyPath := ""
+		err = item.Value(func(v []byte) error {
+			iVal, err := fromBadgerType(v)
+			if err != nil {
+				return err
+			}
+			if sVal, ok := iVal.(string); ok {
+				keyPath = sVal
+				return nil
+			}
+			return fmt.Errorf("Unexpected key path %v while fetching from keys/%s", iVal, base64.RawStdEncoding.EncodeToString(tx.Pkey))
+		})
+		if err != nil {
+			return err
+		}
+		if keyPath == "" {
+			return nil
+		}
+
+		userType, parentPath := domainUserTypes.MatchFromPath(keyPath)
+		if userType == nil {
+			return fmt.Errorf("Unsupported key path %s while fetching from keys/%s", keyPath, base64.RawStdEncoding.EncodeToString(tx.Pkey))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, ErrorUnexpected, err.Error()
+	}
+	/*
+		if keyPath == "" {
+			return nil, ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))
+		}
+	*/
+	return nil, 0, ""
+}
+
+func (app *AthenaStoreApplication) isValid(tx *athenaTx, auth interface{}) (code uint32, codeDescr string) {
 	//key, value := parts[0], parts[1]
 
 	// check if the same key=value already exists
@@ -266,7 +368,11 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.isValid(tx)
+	auth, code, info := app.isAuth(tx)
+	if code != 0 {
+		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
+	}
+	code, info = app.isValid(tx, auth)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -280,11 +386,15 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.isValid(tx)
+	auth, code, info := app.isAuth(tx)
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	return abcitypes.ResponseCheckTx{Code: 0, GasWanted: 1}
+	code, info = app.isValid(tx, auth)
+	if code != 0 {
+		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
+	}
+	return abcitypes.ResponseCheckTx{Code: 0}
 }
 
 // Commit Persist the application state. Later calls to Query can return proofs about the application state anchored in this Merkle root hash

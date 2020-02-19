@@ -1,20 +1,4 @@
 {
-    "userTypes": {
-        "admin":{
-            "usePassphrase":false
-        },
-        "user":{
-            "usePassphrase":true
-        },
-        "login":{
-            "usePassphrase":false,
-            "parent":"user"
-        },
-        "domain":{
-            "usePassphrase":false,
-            "parent":"user"
-        }
-    },
     "public":{
         "numRounds":100000
     }
