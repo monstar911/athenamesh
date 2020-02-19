@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -19,29 +20,29 @@ type treeStateData struct {
 
 type userTypeConfig struct {
 	UsePassphrase bool
-	Parent        *userTypeConfig
+	IsAuthorized  bool
 	PathPat       *regexp.Regexp
 }
 
 var adminUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
+	IsAuthorized:  true,
 	PathPat:       regexp.MustCompile("^config/rootUser$"),
 }
 
 var userUserTypeConfig = &userTypeConfig{
 	UsePassphrase: true,
+	IsAuthorized:  true,
 	PathPat:       regexp.MustCompile("^user/[^/]+$"),
 }
 
 var loginUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
-	Parent:        userUserTypeConfig,
 	PathPat:       regexp.MustCompile("^(user/[^/]+)/login/[^/]+$"),
 }
 
 var domainUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
-	Parent:        userUserTypeConfig,
 	PathPat:       regexp.MustCompile("^(user/[^/]+)/domain/[^/]+$"),
 }
 
@@ -136,116 +137,12 @@ func (app *AthenaStoreApplication) loadTreeState() error {
 	})
 }
 
-/*
-func (app *AthenaStoreApplication) loadConfig(txn *badger.Txn) (map[string]*userTypeConfig, error) {
-	// (re-)load our operating configuration
-	entry, err := GetBadgerTree(txn, "config/userTypes")
-	if err != nil {
-		return nil, err
-	}
-	if entry == nil {
-		// brand new KV store.  This... doesn't seem to be the place to populate defaults, but we can't operate without it
-		return nil, nil
-	}
-	if iEntry, ok := entry.(map[string]interface{}); ok {
-		userTypes := make(map[string]*userTypeConfig)
-		for key, val := range iEntry {
-			if _, ok = userTypes[key]; ok {
-				return nil, fmt.Errorf("unexpected duplicate user config %s", key)
-			}
-			if iVal, ok := val.(map[string]interface{}); ok {
-				thisType := &userTypeConfig{}
-				userTypes[key] = thisType
-				if uPP, ok := iVal["usePassphrase"]; ok {
-					if bUPP, ok := uPP.(bool); ok {
-						thisType.UsePassphrase = bUPP
-					} else {
-						return nil, fmt.Errorf("Unexpected value querying user config %s.usePassphrase: %v", key, uPP)
-					}
-				}
-				if parent, ok := iVal["parent"]; ok {
-					if sParent, ok := parent.(string); ok {
-						if sParentType, ok := userTypes[sParent]; ok {
-							thisType.Parent = sParentType
-						} else {
-							return nil, fmt.Errorf("Could not locate parent type %s referenced in user config %s", sParent, key)
-						}
-					} else {
-						return nil, fmt.Errorf("Unexpected value querying user config %s.parent: %v", key, parent)
-					}
-				}
-			} else {
-				return nil, fmt.Errorf("Unexpected value querying user config %s: %v", key, val)
-			}
-		}
-		return userTypes, nil
-	}
-	return nil, fmt.Errorf("Unexpected value querying user config: %v", entry)
-}
-
-func storeDefaultConfigImpl(txn *badger.Txn, src map[string]interface{}, dest string) error {
-	for key, val := range src {
-		var err error = nil
-		subkey := fmt.Sprintf("%s/%s", dest, key)
-		switch v := val.(type) {
-		case map[string]interface{}:
-			err = storeDefaultConfigImpl(txn, v, subkey)
-		default:
-			var bval []byte
-			bval, err = ToBadgerType(v)
-			if err != nil {
-				err = txn.Set([]byte(subkey), bval)
-			}
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (app *AthenaStoreApplication) storeDefaultConfig() error {
-	return app.db.Update(func(txn *badger.Txn) error {
-		if config, ok := DefaultConfig.(map[string]interface{}); ok {
-			return storeDefaultConfigImpl(txn, config, "config")
-		}
-		return fmt.Errorf("Unexpected value trying to store default configuration: %v", DefaultConfig)
-	})
-}
-*/
 func (app *AthenaStoreApplication) init() {
 	// load our current status
 	err := app.loadTreeState()
 	if err != nil {
 		panic("Unexpected error on loading tree state: " + err.Error())
 	}
-	/*var userTypes map[string]*userTypeConfig
-	err = app.db.View(func(txn *badger.Txn) error {
-		var err error
-		userTypes, err = app.loadConfig(txn)
-		return err
-	})
-	if err != nil {
-		panic("Unexpected error on loading config: " + err.Error())
-	}
-	if userTypes == nil {
-		err = app.storeDefaultConfig()
-		if err != nil {
-			panic("Unexpected error populating default config: " + err.Error())
-		}
-		err = app.db.View(func(txn *badger.Txn) error {
-			var err error
-			userTypes, err = app.loadConfig(txn)
-			return err
-		})
-		if err != nil {
-			panic("Unexpected error on loading config: " + err.Error())
-		}
-		if userTypes == nil {
-			panic("Unable to populate default config")
-		}
-	}
-	app.userConfig = userTypes*/
 }
 
 // Info Return information about the application state
@@ -283,53 +180,116 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	return &dec, ErrorOk, ""
 }
 
-func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (interface{}, uint32, string) {
+func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*userTypeConfig, map[string]interface{}, uint32, string) {
+
+	var resultUserType *userTypeConfig
+	var resultUserAuth map[string]interface{}
 
 	err := app.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(append([]byte("keys/"), []byte(base64.RawStdEncoding.EncodeToString(tx.Pkey))...))
-		if err != nil {
-			if err != badger.ErrKeyNotFound {
-				return err // some error happened, just fail out now
-			}
-			return nil // no key found
+		keyQuery := "keys/" + base64.RawStdEncoding.EncodeToString(tx.Pkey)
+		gKeyPath, err := GetBadgerVal(txn, keyQuery)
+		if err != nil || gKeyPath == nil {
+			return err // error or no key found
 		}
-		keyPath := ""
-		err = item.Value(func(v []byte) error {
-			iVal, err := fromBadgerType(v)
-			if err != nil {
-				return err
-			}
-			if sVal, ok := iVal.(string); ok {
-				keyPath = sVal
-				return nil
-			}
-			return fmt.Errorf("Unexpected key path %v while fetching from keys/%s", iVal, base64.RawStdEncoding.EncodeToString(tx.Pkey))
-		})
-		if err != nil {
-			return err
-		}
-		if keyPath == "" {
-			return nil
+
+		keyPath, ok := gKeyPath.(string)
+		if !ok {
+			return fmt.Errorf("Unexpected key path %v while fetching from %s", gKeyPath, keyQuery)
 		}
 
 		userType, parentPath := domainUserTypes.MatchFromPath(keyPath)
 		if userType == nil {
-			return fmt.Errorf("Unsupported key path %s while fetching from keys/%s", keyPath, base64.RawStdEncoding.EncodeToString(tx.Pkey))
+			return fmt.Errorf("Unsupported key path %s while fetching from %s", keyPath, keyQuery)
 		}
+
+		acctPath := keyPath + "/auth"
+		var gAcctData interface{}
+		gAcctData, err = GetBadgerTree(txn, acctPath)
+		if err != nil || gAcctData == nil {
+			return fmt.Errorf("Missing key path %s while fetching from %s", acctPath, keyQuery)
+		}
+		var acctData map[string]interface{}
+		acctData, ok = gAcctData.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("Unexpected account object %v while fetching from %s", gAcctData, acctPath)
+		}
+		var gPubKey interface{}
+		gPubKey, ok = acctData["pubKey"]
+		if !ok {
+			return fmt.Errorf("Account object %s missing pubKey", acctPath)
+		}
+		var pubKey string
+		pubKey, ok = gPubKey.(string)
+		if !ok {
+			return fmt.Errorf("Found unexpected non-string %v reading %s/pubKey", gPubKey, acctPath)
+		}
+		if pubKey != string(tx.Pkey) {
+			return fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
+				base64.RawStdEncoding.EncodeToString(tx.Pkey),
+				base64.RawStdEncoding.EncodeToString([]byte(pubKey)))
+		}
+
+		if parentPath != "" {
+			var gParentSign interface{}
+			gParentSign, ok = acctData["sign"]
+			if !ok {
+				return errors.New("Account is a child object but is missing a signature")
+			}
+			var parentSign string
+			parentSign, ok = gParentSign.(string)
+			if !ok {
+				return fmt.Errorf("Found unexpected non-string %v reading %s/sign", gParentSign, acctPath)
+			}
+
+			parentUserType, _ := domainUserTypes.MatchFromPath(parentPath)
+			if parentUserType == nil {
+				return fmt.Errorf("Unsupported parent key path %s", parentPath)
+			}
+
+			parentAcctPath := parentPath + "/auth"
+			var gParentAcctData interface{}
+			gParentAcctData, err = GetBadgerTree(txn, parentAcctPath)
+			if err != nil || gParentAcctData == nil {
+				return fmt.Errorf("Missing key path %s while fetching from %s", parentAcctPath, parentAcctPath)
+			}
+			var parentAcctData map[string]interface{}
+			parentAcctData, ok = gParentAcctData.(map[string]interface{})
+			if !ok {
+				return fmt.Errorf("Unexpected account object %v while fetching from %s", gParentAcctData, parentAcctPath)
+			}
+			var gParentPubKey interface{}
+			gParentPubKey, ok = parentAcctData["pubKey"]
+			if !ok {
+				return fmt.Errorf("Account object %s missing pubKey", parentAcctPath)
+			}
+			var parentPubKey string
+			parentPubKey, ok = gParentPubKey.(string)
+			if !ok {
+				return fmt.Errorf("Found unexpected non-string %v reading %s/pubKey", gParentPubKey, parentAcctPath)
+			}
+			if !ed25519.Verify([]byte(parentPubKey), tx.Pkey, []byte(parentSign)) {
+				return errors.New("Account is a child object but its signature was failed by its parent")
+			}
+
+			resultUserType = parentUserType
+			resultUserAuth = parentAcctData
+			return nil
+		}
+
+		resultUserType = userType
+		resultUserAuth = acctData
 		return nil
 	})
 	if err != nil {
-		return nil, ErrorUnexpected, err.Error()
+		return nil, nil, ErrorUnexpected, err.Error()
 	}
-	/*
-		if keyPath == "" {
-			return nil, ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))
-		}
-	*/
-	return nil, 0, ""
+	if resultUserType == nil {
+		return nil, nil, ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))
+	}
+	return resultUserType, resultUserAuth, 0, ""
 }
 
-func (app *AthenaStoreApplication) isValid(tx *athenaTx, auth interface{}) (code uint32, codeDescr string) {
+func (app *AthenaStoreApplication) isValid(tx *athenaTx, user *userTypeConfig, userData map[string]interface{}) (code uint32, codeDescr string) {
 	//key, value := parts[0], parts[1]
 
 	// check if the same key=value already exists
@@ -368,11 +328,11 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	auth, code, info := app.isAuth(tx)
+	user, userData, code, info := app.isAuth(tx)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.isValid(tx, auth)
+	code, info = app.isValid(tx, user, userData)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -386,11 +346,11 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	auth, code, info := app.isAuth(tx)
+	user, userData, code, info := app.isAuth(tx)
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.isValid(tx, auth)
+	code, info = app.isValid(tx, user, userData)
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
