@@ -5,20 +5,31 @@ import (
 	"bufio"
 	"crypto/ed25519"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"syscall"
 
+	"github.com/dgraph-io/badger"
+	"github.com/pkg/errors"
+	"github.com/spf13/viper"
+	abci "github.com/tendermint/tendermint/abci/types"
 	cfg "github.com/tendermint/tendermint/config"
+	tmflags "github.com/tendermint/tendermint/libs/cli/flags"
 	tmlog "github.com/tendermint/tendermint/libs/log"
+	tmos "github.com/tendermint/tendermint/libs/os"
 	tmrand "github.com/tendermint/tendermint/libs/rand"
+	nm "github.com/tendermint/tendermint/node"
 	"github.com/tendermint/tendermint/p2p"
 	"github.com/tendermint/tendermint/privval"
+	"github.com/tendermint/tendermint/proxy"
 	"github.com/tendermint/tendermint/types"
 	tmtime "github.com/tendermint/tendermint/types/time"
 )
-
-var logger = tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
 
 func retrieveDefaultConfig() (interface{}, error) {
 	file, err := Resources.Open("default_config.json")
@@ -35,62 +46,181 @@ func retrieveDefaultConfig() (interface{}, error) {
 // DefaultConfig represents the default configuration when none is available
 var DefaultConfig interface{}
 
-func doInit() error {
+func doInit(config *cfg.Config, logger tmlog.Logger) error {
 	// private validator
-	config := cfg.DefaultConfig()
 	privValKeyFile := config.PrivValidatorKeyFile()
 	privValStateFile := config.PrivValidatorStateFile()
-	pv := privval.GenFilePV(privValKeyFile, privValStateFile)
-	pv.Save()
-	logger.Info("Generated private validator", "keyFile", privValKeyFile, "stateFile", privValStateFile)
+
+	if err := tmos.EnsureDir(privValKeyFile, 0700); err != nil {
+		return errors.Wrap(err, "failed to create required folder")
+	}
+	if err := tmos.EnsureDir(privValStateFile, 0700); err != nil {
+		return errors.Wrap(err, "failed to create required folder")
+	}
+
+	var pv *privval.FilePV
+	if tmos.FileExists(privValKeyFile) {
+		pv = privval.LoadFilePV(privValKeyFile, privValStateFile)
+		logger.Info("Found private validator", "keyFile", privValKeyFile, "stateFile", privValStateFile)
+	} else {
+		pv = privval.GenFilePV(privValKeyFile, privValStateFile)
+		pv.Save()
+		logger.Info("Generated private validator", "keyFile", privValKeyFile, "stateFile", privValStateFile)
+	}
 
 	nodeKeyFile := config.NodeKeyFile()
-	if _, err := p2p.LoadOrGenNodeKey(nodeKeyFile); err != nil {
-		return err
+	if err := tmos.EnsureDir(nodeKeyFile, 0700); err != nil {
+		return errors.Wrap(err, "failed to create required folder")
 	}
-	logger.Info("Generated node key", "path", nodeKeyFile)
+	if tmos.FileExists(nodeKeyFile) {
+		logger.Info("Found node key", "path", nodeKeyFile)
+	} else {
+		if _, err := p2p.LoadOrGenNodeKey(nodeKeyFile); err != nil {
+			return errors.Wrap(err, "failed to generate node key")
+		}
+		logger.Info("Generated node key", "path", nodeKeyFile)
+	}
 
 	// genesis file
 	genFile := config.GenesisFile()
-	genDoc := types.GenesisDoc{
-		ChainID:         fmt.Sprintf("test-chain-%v", tmrand.Str(6)),
-		GenesisTime:     tmtime.Now(),
-		ConsensusParams: types.DefaultConsensusParams(),
+	if err := tmos.EnsureDir(genFile, 0700); err != nil {
+		return errors.Wrap(err, "failed to create required folder")
 	}
-	key := pv.GetPubKey()
-	genDoc.Validators = []types.GenesisValidator{{
-		Address: key.Address(),
-		PubKey:  key,
-		Power:   10,
-	}}
+	if tmos.FileExists(genFile) {
+		logger.Info("Found genesis file", "path", genFile)
+	} else {
+		genDoc := types.GenesisDoc{
+			ChainID:         fmt.Sprintf("athenamesh-%v", tmrand.Str(6)),
+			GenesisTime:     tmtime.Now(),
+			ConsensusParams: types.DefaultConsensusParams(),
+		}
+		key := pv.GetPubKey()
+		genDoc.Validators = []types.GenesisValidator{{
+			Address: key.Address(),
+			PubKey:  key,
+			Power:   10,
+		}}
 
-	if err := genDoc.SaveAs(genFile); err != nil {
-		return err
+		if err := genDoc.SaveAs(genFile); err != nil {
+			return errors.Wrap(err, "failed to create genesis file")
+		}
+		logger.Info("Generated genesis file", "path", genFile)
 	}
-	logger.Info("Generated genesis file", "path", genFile)
+
+	configFile := filepath.Join(filepath.Dir(nodeKeyFile), "config.toml")
+	if !tmos.FileExists(configFile) {
+		cfg.WriteConfigFile(configFile, config)
+		logger.Info("Generated config file", "path", configFile)
+	}
+
 	return nil
 }
 
-func doNode() {
+func instantiateApp(app abci.Application, config *cfg.Config, configFile string, logger tmlog.Logger) (*nm.Node, error) {
+	// read config
+	config.RootDir = filepath.Dir(filepath.Dir(configFile))
+	viper.SetConfigFile(configFile)
+	if err := viper.ReadInConfig(); err != nil {
+		return nil, errors.Wrap(err, "viper failed to read config file")
+	}
+	if err := viper.Unmarshal(config); err != nil {
+		return nil, errors.Wrap(err, "viper failed to unmarshal config")
+	}
+	if err := config.ValidateBasic(); err != nil {
+		return nil, errors.Wrap(err, "config is invalid")
+	}
 
+	// create logger
+	var err error
+	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, cfg.DefaultLogLevel())
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse log level")
+	}
+
+	// read private validator
+	pv := privval.LoadFilePV(
+		config.PrivValidatorKeyFile(),
+		config.PrivValidatorStateFile(),
+	)
+
+	// read node key
+	nodeKey, err := p2p.LoadNodeKey(config.NodeKeyFile())
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load node's key")
+	}
+
+	// create node
+	node, err := nm.NewNode(
+		config,
+		pv,
+		nodeKey,
+		proxy.NewLocalClientCreator(app),
+		nm.DefaultGenesisDocProviderFunc(config),
+		nm.DefaultDBProvider,
+		nm.DefaultMetricsProvider(config.Instrumentation),
+		logger)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create new Tendermint node")
+	}
+
+	return node, nil
+}
+
+func doNode(config *cfg.Config, logger tmlog.Logger) error {
+	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
+	dbopt := badger.DefaultOptions(dbPath)
+	if runtime.GOOS == "windows" {
+		dbopt.WithTruncate(true)
+	}
+	db, err := badger.Open(dbopt)
+	if err != nil {
+		return errors.Wrap(err, "failed to open badger db")
+	}
+	defer db.Close()
+	app := NewAthenaStoreApplication(db)
+
+	flag.Parse()
+
+	configFile := filepath.Join(filepath.Dir(config.NodeKeyFile()), "config.toml")
+	node, err := instantiateApp(app, config, configFile, logger)
+	if err != nil {
+		return err
+	}
+
+	node.Start()
+	defer func() {
+		node.Stop()
+		node.Wait()
+	}()
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+	return nil
 }
 
 func main() {
-	doInit()
+	config := cfg.DefaultConfig()
+	logger := tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
+	err := doNode(config, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Fatal error: %v", err.Error())
+		os.Exit(1)
+	}
 	return
 
 	args := os.Args[1:]
 	if len(args) > 0 {
 		switch args[0] {
 		case "init":
-			doInit()
+			doInit(config, logger)
 			return
 		case "node":
-			doNode()
+			doNode(config, logger)
 			return
 		}
 	}
-	var err error
+
 	DefaultConfig, err = retrieveDefaultConfig()
 	if err != nil {
 		panic(err.Error())
