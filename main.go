@@ -5,8 +5,20 @@ import (
 	"bufio"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"log"
+	"os"
+
+	cfg "github.com/tendermint/tendermint/config"
+	tmlog "github.com/tendermint/tendermint/libs/log"
+	tmrand "github.com/tendermint/tendermint/libs/rand"
+	"github.com/tendermint/tendermint/p2p"
+	"github.com/tendermint/tendermint/privval"
+	"github.com/tendermint/tendermint/types"
+	tmtime "github.com/tendermint/tendermint/types/time"
 )
+
+var logger = tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
 
 func retrieveDefaultConfig() (interface{}, error) {
 	file, err := Resources.Open("default_config.json")
@@ -23,7 +35,61 @@ func retrieveDefaultConfig() (interface{}, error) {
 // DefaultConfig represents the default configuration when none is available
 var DefaultConfig interface{}
 
+func doInit() error {
+	// private validator
+	config := cfg.DefaultConfig()
+	privValKeyFile := config.PrivValidatorKeyFile()
+	privValStateFile := config.PrivValidatorStateFile()
+	pv := privval.GenFilePV(privValKeyFile, privValStateFile)
+	pv.Save()
+	logger.Info("Generated private validator", "keyFile", privValKeyFile, "stateFile", privValStateFile)
+
+	nodeKeyFile := config.NodeKeyFile()
+	if _, err := p2p.LoadOrGenNodeKey(nodeKeyFile); err != nil {
+		return err
+	}
+	logger.Info("Generated node key", "path", nodeKeyFile)
+
+	// genesis file
+	genFile := config.GenesisFile()
+	genDoc := types.GenesisDoc{
+		ChainID:         fmt.Sprintf("test-chain-%v", tmrand.Str(6)),
+		GenesisTime:     tmtime.Now(),
+		ConsensusParams: types.DefaultConsensusParams(),
+	}
+	key := pv.GetPubKey()
+	genDoc.Validators = []types.GenesisValidator{{
+		Address: key.Address(),
+		PubKey:  key,
+		Power:   10,
+	}}
+
+	if err := genDoc.SaveAs(genFile); err != nil {
+		return err
+	}
+	logger.Info("Generated genesis file", "path", genFile)
+	return nil
+}
+
+func doNode() {
+
+}
+
 func main() {
+	doInit()
+	return
+
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "init":
+			doInit()
+			return
+		case "node":
+			doNode()
+			return
+		}
+	}
 	var err error
 	DefaultConfig, err = retrieveDefaultConfig()
 	if err != nil {
