@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/dgraph-io/badger"
@@ -51,10 +52,10 @@ func doInit(config *cfg.Config, logger tmlog.Logger) error {
 	privValKeyFile := config.PrivValidatorKeyFile()
 	privValStateFile := config.PrivValidatorStateFile()
 
-	if err := tmos.EnsureDir(privValKeyFile, 0700); err != nil {
+	if err := tmos.EnsureDir(filepath.Dir(privValKeyFile), 0700); err != nil {
 		return errors.Wrap(err, "failed to create required folder")
 	}
-	if err := tmos.EnsureDir(privValStateFile, 0700); err != nil {
+	if err := tmos.EnsureDir(filepath.Dir(privValStateFile), 0700); err != nil {
 		return errors.Wrap(err, "failed to create required folder")
 	}
 
@@ -69,7 +70,7 @@ func doInit(config *cfg.Config, logger tmlog.Logger) error {
 	}
 
 	nodeKeyFile := config.NodeKeyFile()
-	if err := tmos.EnsureDir(nodeKeyFile, 0700); err != nil {
+	if err := tmos.EnsureDir(filepath.Dir(nodeKeyFile), 0700); err != nil {
 		return errors.Wrap(err, "failed to create required folder")
 	}
 	if tmos.FileExists(nodeKeyFile) {
@@ -83,7 +84,7 @@ func doInit(config *cfg.Config, logger tmlog.Logger) error {
 
 	// genesis file
 	genFile := config.GenesisFile()
-	if err := tmos.EnsureDir(genFile, 0700); err != nil {
+	if err := tmos.EnsureDir(filepath.Dir(genFile), 0700); err != nil {
 		return errors.Wrap(err, "failed to create required folder")
 	}
 	if tmos.FileExists(genFile) {
@@ -169,8 +170,8 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 func doNode(config *cfg.Config, logger tmlog.Logger) error {
 	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
 	dbopt := badger.DefaultOptions(dbPath)
-	if runtime.GOOS == "windows" {
-		dbopt.WithTruncate(true)
+	if strings.HasPrefix(runtime.GOOS, "windows") {
+		dbopt = dbopt.WithTruncate(true)
 	}
 	db, err := badger.Open(dbopt)
 	if err != nil {
@@ -199,33 +200,36 @@ func doNode(config *cfg.Config, logger tmlog.Logger) error {
 	return nil
 }
 
-func main() {
-	config := cfg.DefaultConfig()
-	logger := tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
-	err := doNode(config, logger)
+func rootErrors(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal error: %v", err.Error())
 		os.Exit(1)
 	}
-	return
+}
+
+func main() {
+	config := cfg.DefaultConfig()
+	logger := tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
+	//rootErrors(doNode(config, logger))
+	//return
 
 	args := os.Args[1:]
 	if len(args) > 0 {
 		switch args[0] {
 		case "init":
-			doInit(config, logger)
+			rootErrors(doInit(config, logger))
 			return
 		case "node":
-			doNode(config, logger)
+			rootErrors(doNode(config, logger))
 			return
 		}
 	}
-
-	DefaultConfig, err = retrieveDefaultConfig()
-	if err != nil {
-		panic(err.Error())
-	}
-
+	/*
+		DefaultConfig, err = retrieveDefaultConfig()
+		if err != nil {
+			panic(err.Error())
+		}
+	*/
 	//	priv := "e06d3183d14159228433ed599221b80bd0a5ce8352e4bdf0262f76786ef1c74db7e7a9fea2c0eb269d61e3b38e450a22e754941ac78479d6c54e1faf6037881d"
 	//	pub := "b7e7a9fea2c0eb269d61e3b38e450a22e754941ac78479d6c54e1faf6037881d"
 	//sig := "6834284b6b24c3204eb2fea824d82f88883a3d95e8b4a21b8c0ded553d17d17ddf9a8a7104b1258f30bed3787e6cb896fca78c58f8e03b5f18f14951a87d9a08"
