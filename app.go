@@ -4,9 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/dgraph-io/badger"
@@ -17,56 +15,6 @@ type treeStateData struct {
 	lastBlockHeight int64
 	nextBlockHeight int64
 	lastBlockHash   []byte
-}
-
-type userTypeConfig struct {
-	UsePassphrase bool
-	IsAuthorized  bool
-	PathPat       *regexp.Regexp
-}
-
-var adminUserTypeConfig = &userTypeConfig{
-	UsePassphrase: false,
-	IsAuthorized:  true,
-	PathPat:       regexp.MustCompile("^config/rootUser$"),
-}
-
-var userUserTypeConfig = &userTypeConfig{
-	UsePassphrase: true,
-	IsAuthorized:  true,
-	PathPat:       regexp.MustCompile("^user/[^/]+$"),
-}
-
-var loginUserTypeConfig = &userTypeConfig{
-	UsePassphrase: false,
-	PathPat:       regexp.MustCompile("^(user/[^/]+)/login/[^/]+$"),
-}
-
-var domainUserTypeConfig = &userTypeConfig{
-	UsePassphrase: false,
-	PathPat:       regexp.MustCompile("^(user/[^/]+)/domain/[^/]+$"),
-}
-
-type domainUserTypeStore struct {
-	userTypes []*userTypeConfig
-}
-
-var domainUserTypes = &domainUserTypeStore{
-	userTypes: []*userTypeConfig{adminUserTypeConfig, userUserTypeConfig, loginUserTypeConfig, domainUserTypeConfig},
-}
-
-func (app *domainUserTypeStore) MatchFromPath(path string) (*userTypeConfig, string) {
-	for _, typ := range app.userTypes {
-		matches := typ.PathPat.FindStringSubmatch(path)
-		if matches != nil {
-			parentPath := ""
-			if len(matches) > 1 {
-				parentPath = matches[1]
-			}
-			return typ, parentPath
-		}
-	}
-	return nil, ""
 }
 
 // AthenaStoreApplication defines our blockchain application and its behavior
@@ -109,7 +57,7 @@ func NewAthenaStoreApplication(db *badger.DB) *AthenaStoreApplication {
 func (app *AthenaStoreApplication) loadTreeState() error {
 	// load our current status
 	return app.db.View(func(txn *badger.Txn) error {
-		val, err := GetBadgerTree(txn, "!")
+		val, err := GetBadgerVal(txn, "mesh/blockState")
 		if err != nil {
 			return err
 		}
@@ -181,128 +129,12 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	return &dec, ErrorOk, ""
 }
 
-func queryAccountData(txn *badger.Txn, path string) (map[string]interface{}, error) {
-	acctPath := path + "/auth"
-	gAcctData, err := GetBadgerTree(txn, acctPath)
-	if err != nil {
-		return nil, err
-	}
-	if gAcctData == nil {
-		return nil, nil
-	}
-	acctData, ok := gAcctData.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("Unexpected account object %v while fetching from %s", gAcctData, acctPath)
-	}
-	return acctData, nil
-}
-
-func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*userTypeConfig, map[string]interface{}, error) {
-
-	var resultUserType *userTypeConfig
-	var resultUserAuth map[string]interface{}
-
-	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here
-	err := app.db.View(func(txn *badger.Txn) error {
-		keyQuery := "keys/" + base64.RawStdEncoding.EncodeToString(tx.Pkey)
-		gKeyPath, err := GetBadgerVal(txn, keyQuery)
-		if err != nil || gKeyPath == nil {
-			return err // error or no key found
-		}
-
-		keyPath, ok := gKeyPath.(string)
-		if !ok {
-			return fmt.Errorf("Unexpected key path %v while fetching from %s", gKeyPath, keyQuery)
-		}
-
-		userType, parentPath := domainUserTypes.MatchFromPath(keyPath)
-		if userType == nil {
-			return fmt.Errorf("Unsupported key path %s while fetching from %s", keyPath, keyQuery)
-		}
-
-		var acctData map[string]interface{}
-		acctData, err = queryAccountData(txn, keyPath)
-		if err != nil {
-			return err
-		}
-		if acctData == nil {
-			return fmt.Errorf("Missing key path %s while fetching from %s", keyPath, keyQuery)
-		}
-
-		var gPubKey interface{}
-		gPubKey, ok = acctData["pubKey"]
-		if !ok {
-			return fmt.Errorf("Account object %s/auth missing pubKey", keyPath)
-		}
-		var pubKey string
-		pubKey, ok = gPubKey.(string)
-		if !ok {
-			return fmt.Errorf("Found unexpected non-string %v reading %s/auth/pubKey", gPubKey, keyPath)
-		}
-		if pubKey != string(tx.Pkey) {
-			return fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
-				base64.RawStdEncoding.EncodeToString(tx.Pkey),
-				base64.RawStdEncoding.EncodeToString([]byte(pubKey)))
-		}
-
-		if parentPath != "" {
-			var gParentSign interface{}
-			gParentSign, ok = acctData["sign"]
-			if !ok {
-				return errors.New("Account is a child object but is missing a signature")
-			}
-			var parentSign string
-			parentSign, ok = gParentSign.(string)
-			if !ok {
-				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/sign", gParentSign, keyPath)
-			}
-
-			parentUserType, _ := domainUserTypes.MatchFromPath(parentPath)
-			if parentUserType == nil {
-				return fmt.Errorf("Unsupported parent key path %s", parentPath)
-			}
-
-			var parentAcctData map[string]interface{}
-			parentAcctData, err = queryAccountData(txn, parentPath)
-			if err != nil {
-				return err
-			}
-			if parentAcctData == nil {
-				return fmt.Errorf("Missing key path %s/auth while fetching from %s", parentPath, keyPath)
-			}
-
-			var gParentPubKey interface{}
-			gParentPubKey, ok = parentAcctData["pubKey"]
-			if !ok {
-				return fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
-			}
-			var parentPubKey string
-			parentPubKey, ok = gParentPubKey.(string)
-			if !ok {
-				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/pubKey", gParentPubKey, parentPath)
-			}
-			if !ed25519.Verify([]byte(parentPubKey), tx.Pkey, []byte(parentSign)) {
-				return errors.New("Account is a child object but its signature was failed by its parent")
-			}
-
-			resultUserType = parentUserType
-			resultUserAuth = parentAcctData
-			return nil
-		}
-
-		resultUserType = userType
-		resultUserAuth = acctData
-		return nil
-	})
-	return resultUserType, resultUserAuth, err
-}
-
-func (app *AthenaStoreApplication) isValid(tx *athenaTx, user *userTypeConfig, userData map[string]interface{}) (code uint32, codeDescr string) {
+func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
 	// TODO: stub.  All is permitted
 	return 0, ""
 }
 
-func (app *AthenaStoreApplication) executeTx(tx *athenaTx, user *userTypeConfig, userData map[string]interface{}) (code uint32, codeDescr string) {
+func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
 	// TODO: stub.  Nothing executed
 	return 0, ""
 }
@@ -318,7 +150,7 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	user, userData, err := app.isAuth(tx)
+	user, err := app.isAuth(tx)
 	if err != nil {
 		return abcitypes.ResponseDeliverTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
@@ -326,11 +158,11 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 		return abcitypes.ResponseDeliverTx{Code: ErrorUnknownUser, Codespace: "athena",
 			Info: fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))}
 	}
-	code, info = app.isValid(tx, user, userData)
+	code, info = app.isValid(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.executeTx(tx, user, userData)
+	code, info = app.executeTx(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -344,7 +176,7 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	user, userData, err := app.isAuth(tx)
+	user, err := app.isAuth(tx)
 	if err != nil {
 		return abcitypes.ResponseCheckTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
@@ -352,7 +184,7 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 		return abcitypes.ResponseCheckTx{Code: ErrorUnknownUser, Codespace: "athena",
 			Info: fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))}
 	}
-	code, info = app.isValid(tx, user, userData)
+	code, info = app.isValid(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}

@@ -17,6 +17,8 @@ const (
 	typeInt         = 2
 	typeFloat       = 3
 	typeString      = 4
+	typeArray       = 5
+	typeMap         = 6
 )
 
 // NumberToUint64 attempts to convert numeric val to a uint64
@@ -158,6 +160,44 @@ func fromBadgerType(val []byte) (interface{}, error) {
 		}
 	case typeString:
 		return string(val[1:]), nil
+	case typeArray:
+		vals := make([]interface{}, 0)
+		remain := val[1:]
+		for len(remain) > 0 {
+			entryLen, lenSize := readVarint(remain)
+			if lenSize == 0 {
+				return nil, errors.New("unexpected array element length")
+			}
+			entry, err := fromBadgerType(remain[lenSize : uint(entryLen)+lenSize])
+			if err != nil {
+				return nil, err
+			}
+			vals = append(vals, entry)
+			remain = remain[uint(entryLen)+lenSize:]
+		}
+		return vals, nil
+	case typeMap:
+		vals := make(map[string]interface{})
+		remain := val[1:]
+		for len(remain) > 0 {
+			keyLen, lenSize := readVarint(remain)
+			if lenSize == 0 {
+				return nil, errors.New("unexpected key element length")
+			}
+			key := string(remain[lenSize : uint(keyLen)+lenSize])
+			remain = remain[uint(keyLen)+lenSize:]
+			valueLen, lenSize := readVarint(remain)
+			if lenSize == 0 {
+				return nil, errors.New("unexpected value element length")
+			}
+			value, err := fromBadgerType(remain[lenSize : uint(valueLen)+lenSize])
+			if err != nil {
+				return nil, err
+			}
+			remain = remain[uint(keyLen)+lenSize:]
+			vals[key] = value
+		}
+		return vals, nil
 	default:
 		return nil, fmt.Errorf("Unexpected datatype: %d", val[0])
 	}
@@ -209,11 +249,110 @@ func ToBadgerType(val interface{}) ([]byte, error) {
 	case string:
 		ret := append([]byte{typeString}, []byte(v)...)
 		return ret, nil
+	case []interface{}:
+		result := []byte{typeArray}
+		l := len(v)
+		for i := 0; i < l; i++ {
+			entry, err := ToBadgerType(v[i])
+			if err != nil {
+				return nil, err
+			}
+			result = append(append(result, writeVarint(uint64(len(entry)))...), entry...)
+		}
+		return result, nil
+	case map[string]interface{}:
+		result := []byte{typeMap}
+		for key, value := range v {
+			entry, err := ToBadgerType(value)
+			if err != nil {
+				return nil, err
+			}
+			result = append(append(append(append(result, writeVarint(uint64(len(key)))...), []byte(key)...),
+				writeVarint(uint64(len(entry)))...), entry...)
+		}
+		return result, nil
 	case nil:
 		return nil, nil
 	default:
 		return nil, errors.New("Unsupported datatype")
 	}
+}
+
+func readVarint(src []byte) (uint64, uint) {
+	c := src[0]
+	if c < 0x80 {
+		return uint64(c), 1
+	}
+	if c < 0b11000000 {
+		// unexpected continuation byte
+		return 0, 0
+	}
+	var size uint
+	var result uint64
+	if c < 0b11100000 {
+		size = 1
+		result = uint64(c & 0b00011111)
+	} else if c < 0b11110000 {
+		size = 2
+		result = uint64(c & 0b00001111)
+	} else if c < 0b11111000 {
+		size = 3
+		result = uint64(c & 0b00000111)
+	} else if c < 0b11111100 {
+		size = 4
+		result = uint64(c & 0b00000011)
+	} else if c < 0b11111110 {
+		size = 5
+		result = uint64(c & 0b00000001)
+	} else {
+		size = 6
+		result = 0
+	}
+	var idx uint
+	for idx = 0; idx < size; idx++ {
+		c = src[idx+1]
+		if c&0b11000000 != 0b10000000 {
+			// this isn't a continuation byte
+			return 0, 0
+		}
+		result = result<<6 | uint64(src[idx+1]&0b00111111)
+	}
+	return result, size + 1
+}
+
+func writeVarint(val uint64) []byte {
+	if val < 0x80 {
+		return []byte{byte(val)}
+	}
+	var size uint
+	var first byte
+	if val < 0x00000800 { // 0000 0000 0000 0000 0000 0111 11|11 1111
+		size = 1
+		first = byte((val&0x000007C0)>>6 | 0b11000000)
+	} else if val < 0x00010000 { // 0000 0000 0000 0000 1111 |1111 11|11 1111
+		size = 2
+		first = byte((val&0x0000F000)>>12 | 0b11100000)
+	} else if val < 0x00200000 { // 0000 0000 0001 11|11 1111 |1111 11|11 1111
+		size = 3
+		first = byte((val&0x001C0000)>>18 | 0b11110000)
+	} else if val < 0x04000000 { // 0000 0011 |1111 11|11 1111 |1111 11|11 1111
+		size = 4
+		first = byte((val&0x03000000)>>24 | 0b11111000)
+	} else if val < 0x80000000 { // 01|11 1111 |1111 11|11 1111 |1111 11|11 1111
+		size = 5
+		first = byte((val&0x40000000)>>30 | 0b11111100)
+	} else {
+		size = 6
+		first = 0b11111110
+	}
+	var idx uint
+	result := make([]byte, size+1)
+	for idx = 0; idx < size; idx++ {
+		result[size-idx] = byte(val&0b111111) | 0b10000000
+		val = val >> 6
+	}
+	result[0] = first
+	return result
 }
 
 // GetBadgerVal retrieve the specified key as a scalar from a Badger KV store

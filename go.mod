@@ -7,4 +7,5 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/viper v1.6.2
 	github.com/tendermint/tendermint v0.33.1
+	golang.org/x/text v0.3.0
 )
