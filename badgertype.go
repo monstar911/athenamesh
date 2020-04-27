@@ -17,8 +17,9 @@ const (
 	typeInt         = 2
 	typeFloat       = 3
 	typeString      = 4
-	typeArray       = 5
-	typeMap         = 6
+	typeBytes       = 5
+	typeArray       = 6
+	typeMap         = 7
 )
 
 // NumberToUint64 attempts to convert numeric val to a uint64
@@ -160,6 +161,8 @@ func fromBadgerType(val []byte) (interface{}, error) {
 		}
 	case typeString:
 		return string(val[1:]), nil
+	case typeBytes:
+		return val[1:], nil
 	case typeArray:
 		vals := make([]interface{}, 0)
 		remain := val[1:]
@@ -248,6 +251,9 @@ func ToBadgerType(val interface{}) ([]byte, error) {
 		return ret, nil
 	case string:
 		ret := append([]byte{typeString}, []byte(v)...)
+		return ret, nil
+	case []byte:
+		ret := append([]byte{typeBytes}, v...)
 		return ret, nil
 	case []interface{}:
 		result := []byte{typeArray}
@@ -394,50 +400,4 @@ func storeDenseKey(store map[string]interface{}, key string, val interface{}) {
 	subMap := map[string]interface{}{}
 	store[head] = subMap
 	storeDenseKey(subMap, body, val)
-}
-
-// GetBadgerTree retrieve the specified key as a scalar or subtree from a Badger KV store
-func GetBadgerTree(txn *badger.Txn, key string) (interface{}, error) {
-	item, err := txn.Get([]byte(key))
-	if err != nil {
-		if err != badger.ErrKeyNotFound {
-			// some error happened, just fail out now
-			return nil, err
-		}
-		val := map[string]interface{}{}
-		foundOne := false
-		iter := txn.NewIterator(badger.DefaultIteratorOptions)
-		defer iter.Close()
-		prefix := append([]byte(key), byte('/'))
-		for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
-			item := iter.Item()
-			err := item.Value(func(v []byte) error {
-				iVal, err := fromBadgerType(v)
-				if err != nil {
-					return err
-				}
-				storeDenseKey(val, string(item.Key()[len(prefix):]), iVal)
-				return nil
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-		if foundOne {
-			return val, nil // we found an object with nested values, return it
-		}
-		return nil, nil // didn't find anything, just return empty
-	}
-
-	// we found a single value, return it
-	var result interface{}
-	err = item.Value(func(val []byte) error {
-		iVal, err := fromBadgerType(val)
-		if err != nil {
-			return err
-		}
-		result = iVal
-		return nil
-	})
-	return result, err
 }

@@ -1,9 +1,6 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -14,26 +11,33 @@ import (
 type userTypeConfig struct {
 	UsePassphrase bool
 	PathPat       *regexp.Regexp
+	ParentIdx     int
+	NameIdx       int
 }
 
 var rootUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
-	PathPat:       regexp.MustCompile("^()()config/rootUser$"),
+	PathPat:       regexp.MustCompile("^config/rootUser$"),
 }
 
 var userUserTypeConfig = &userTypeConfig{
 	UsePassphrase: true,
-	PathPat:       regexp.MustCompile("^()user/([^/])+$"),
+	PathPat:       regexp.MustCompile("^user/([^/]+)$"),
+	NameIdx:       1,
 }
 
 var loginUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
-	PathPat:       regexp.MustCompile("^(user/[^/]+)/login/([^/])+$"),
+	PathPat:       regexp.MustCompile("^(user/[^/]+)/login/([^/]+)$"),
+	ParentIdx:     1,
+	NameIdx:       2,
 }
 
 var domainUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
-	PathPat:       regexp.MustCompile("^(user/[^/]+)/domain/([^/])+$"),
+	PathPat:       regexp.MustCompile("^(user/[^/]+)/domain/([^/]+)$"),
+	ParentIdx:     1,
+	NameIdx:       2,
 }
 
 type domainUserTypeStore struct {
@@ -48,8 +52,8 @@ type loginEntry struct {
 	Type       *userTypeConfig
 	Name       string
 	Parent     *loginEntry
-	Pubkey     string
-	ParentSign string
+	Pubkey     []byte
+	ParentSign []byte
 }
 
 func (login *loginEntry) path() string {
@@ -92,27 +96,27 @@ func (login *loginEntry) queryAccountData(txn *badger.Txn, path string, query st
 	var gPubKey interface{}
 	gPubKey, ok = acctData["pubKey"]
 	if ok {
-		var pubKey string
-		pubKey, ok = gPubKey.(string)
+		var pubKey []byte
+		pubKey, ok = gPubKey.([]byte)
 		if !ok {
 			return fmt.Errorf("Found unexpected non-string %v reading %s/auth/pubKey", gPubKey, path)
 		}
 		login.Pubkey = pubKey
 	} else {
-		login.Pubkey = ""
+		login.Pubkey = []byte{}
 	}
 
 	var gParentSign interface{}
 	gParentSign, ok = acctData["sign"]
 	if ok {
-		var parentSign string
-		parentSign, ok = gParentSign.(string)
+		var parentSign []byte
+		parentSign, ok = gParentSign.([]byte)
 		if !ok {
 			return fmt.Errorf("Found unexpected non-string %v reading %s/auth/sign", gParentSign, path)
 		}
 		login.ParentSign = parentSign
 	} else {
-		login.ParentSign = ""
+		login.ParentSign = []byte{}
 	}
 
 	return nil
@@ -121,10 +125,10 @@ func (login *loginEntry) queryAccountData(txn *badger.Txn, path string, query st
 func (login *loginEntry) assembleAccountData() map[string]interface{} {
 	result := make(map[string]interface{})
 
-	if login.Pubkey != "" {
+	if len(login.Pubkey) > 0 {
 		result["pubKey"] = login.Pubkey
 	}
-	if login.ParentSign != "" {
+	if len(login.ParentSign) > 0 {
 		result["sign"] = login.ParentSign
 	}
 	if login.Name != "" {
@@ -134,133 +138,20 @@ func (login *loginEntry) assembleAccountData() map[string]interface{} {
 	return nil
 }
 
-func (app *domainUserTypeStore) MatchFromPath(path string) (*userTypeConfig, string, string) {
+func (app *domainUserTypeStore) MatchFromPath(path string) (*loginEntry, string) {
 	for _, typ := range app.userTypes {
 		matches := typ.PathPat.FindStringSubmatch(path)
 		if matches != nil {
+			login := &loginEntry{Type: typ}
 			parentPath := ""
-			loginName := ""
-			if len(matches) > 1 {
-				parentPath = matches[1]
-				if len(matches) > 2 {
-					loginName = matches[2]
-				}
+			if typ.ParentIdx > 0 && len(matches) > typ.ParentIdx {
+				parentPath = matches[typ.ParentIdx]
 			}
-			return typ, parentPath, loginName
-		}
-	}
-	return nil, "", ""
-}
-
-func verifySignature(pubKey string, message string, sig string) bool {
-	if len(pubKey) != ed25519.PublicKeySize || len(sig) != ed25519.SignatureSize {
-		return false
-	}
-	return ed25519.Verify([]byte(pubKey), []byte(message), []byte(sig))
-}
-
-func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
-
-	var login *loginEntry
-
-	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here
-	err := app.db.View(func(txn *badger.Txn) error {
-		keyQuery := "keymap/" + base64.RawStdEncoding.EncodeToString(tx.Pkey)
-		gKeyPath, err := GetBadgerVal(txn, keyQuery)
-		if err != nil || gKeyPath == nil {
-			return err // error or no key found
-		}
-
-		keyPath, ok := gKeyPath.(string)
-		if !ok {
-			return fmt.Errorf("Unexpected key path %v while fetching from %s", gKeyPath, keyQuery)
-		}
-
-		userType, parentPath, loginName := domainUserTypes.MatchFromPath(keyPath)
-		if userType == nil {
-			return fmt.Errorf("Unsupported key path %s while fetching from %s", keyPath, keyQuery)
-		}
-
-		login = &loginEntry{Type: userType, Name: loginName}
-		err = login.queryAccountData(txn, keyPath, keyQuery)
-		if err != nil {
-			return err
-		}
-
-		if login.Pubkey == "" {
-			return fmt.Errorf("Missing key path %s while fetching from %s", keyPath, keyQuery)
-		}
-		if login.Pubkey != string(tx.Pkey) {
-			return fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
-				base64.RawStdEncoding.EncodeToString(tx.Pkey),
-				base64.RawStdEncoding.EncodeToString([]byte(login.Pubkey)))
-		}
-
-		if parentPath != "" {
-			if login.ParentSign == "" {
-				return errors.New("Account is a child object but is missing a signature")
+			if typ.NameIdx > 0 && len(matches) > typ.NameIdx {
+				login.Name = matches[typ.NameIdx]
 			}
-
-			parentUserType, _, parentLoginName := domainUserTypes.MatchFromPath(parentPath)
-			if parentUserType == nil {
-				return fmt.Errorf("Unsupported parent key path %s", parentPath)
-			}
-
-			parentLogin := &loginEntry{Type: parentUserType, Name: parentLoginName}
-			login.Parent = parentLogin
-			err = parentLogin.queryAccountData(txn, parentPath, keyPath)
-			if err != nil {
-				return err
-			}
-
-			if parentLogin.Pubkey == "" {
-				return fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
-			}
-			if !verifySignature(parentLogin.Pubkey, string(tx.Pkey), login.ParentSign) {
-				return errors.New("Account is a child object but its signature was failed by its parent")
-			}
-
-			return nil
-		}
-		return nil
-	})
-	return login, err
-}
-
-func (app *AthenaStoreApplication) createUser(txn *badger.Txn, login *loginEntry) error {
-	if login == nil {
-		return errors.New("Attempt to create an empty user")
-	}
-	path := login.path()
-	if path == "" {
-		return errors.New("Attempt to create an invalid user")
-	}
-	if login.Parent != nil {
-		parentLogin := login.Parent
-		parentPath := parentLogin.path()
-		err := parentLogin.queryAccountData(txn, parentPath, parentPath)
-		if err != nil {
-			return err
-		}
-		if parentLogin.Pubkey == "" {
-			return fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
-		}
-		if !verifySignature(parentLogin.Pubkey, login.Pubkey, login.ParentSign) {
-			return errors.New("Account is a child object but its signature was failed by its parent")
+			return login, parentPath
 		}
 	}
-
-	acctPath := path + "/auth"
-	gAcctData, err := GetBadgerVal(txn, acctPath)
-	if gAcctData != nil || err != nil {
-		return errors.New("Account already exists")
-	}
-
-	newAcctData, err := ToBadgerType(login.assembleAccountData())
-	if err != nil {
-		return err
-	}
-	err = txn.Set([]byte(acctPath), newAcctData)
-
-	return err
+	return nil, ""
 }
