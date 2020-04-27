@@ -177,7 +177,7 @@ func doNode(config *cfg.Config, logger tmlog.Logger) error {
 		return errors.Wrap(err, "failed to open badger db")
 	}
 	defer db.Close()
-	app := NewAthenaStoreApplication(db)
+	app := NewAthenaStoreApplication(db, logger)
 
 	flag.Parse()
 

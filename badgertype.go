@@ -197,13 +197,31 @@ func fromBadgerType(val []byte) (interface{}, error) {
 			if err != nil {
 				return nil, err
 			}
-			remain = remain[uint(keyLen)+lenSize:]
+			remain = remain[uint(valueLen)+lenSize:]
 			vals[key] = value
 		}
 		return vals, nil
 	default:
 		return nil, fmt.Errorf("Unexpected datatype: %d", val[0])
 	}
+}
+
+func toBadgerTypeUint(val uint64) []byte {
+	bits := make([]byte, 8)
+	binary.LittleEndian.PutUint64(bits, val)
+	for len(bits) > 1 && bits[len(bits)-1] == 0 && bits[len(bits)-2] < 0x80 {
+		bits = bits[:len(bits)-1]
+	}
+	return append(append([]byte{typeInt}, bits...), 0)
+}
+
+func toBadgerTypeInt(val int64) []byte {
+	bits := make([]byte, 8)
+	binary.LittleEndian.PutUint64(bits, uint64(val))
+	for len(bits) > 1 && (bits[len(bits)-1] == 0 && bits[len(bits)-2] < 0x80) || (bits[len(bits)-1] == 0xFF && bits[len(bits)-2] >= 0x80) {
+		bits = bits[:len(bits)-1]
+	}
+	return append([]byte{typeInt}, bits...)
 }
 
 // ToBadgerType convert the specified scalar into something stored in a Badger KV store
@@ -218,6 +236,36 @@ func ToBadgerType(val interface{}) ([]byte, error) {
 			ret[1] = 0
 		}
 		return ret, nil
+	case float32:
+		bits := make([]byte, 4)
+		binary.LittleEndian.PutUint32(bits, math.Float32bits(v))
+		ret := append([]byte{typeFloat}, bits...)
+		return ret, nil
+	case float64:
+		bits := make([]byte, 8)
+		binary.LittleEndian.PutUint64(bits, math.Float64bits(v))
+		ret := append([]byte{typeFloat}, bits...)
+		return ret, nil
+	case uint8:
+		return toBadgerTypeUint(uint64(v)), nil
+	case uint16:
+		return toBadgerTypeUint(uint64(v)), nil
+	case uint32:
+		return toBadgerTypeUint(uint64(v)), nil
+	case uint64:
+		return toBadgerTypeUint(v), nil
+	case int8:
+		return toBadgerTypeInt(int64(v)), nil
+	case int16:
+		return toBadgerTypeInt(int64(v)), nil
+	case int32:
+		return toBadgerTypeInt(int64(v)), nil
+	case int64:
+		return toBadgerTypeInt(v), nil
+	case int:
+		return toBadgerTypeInt(int64(v)), nil
+	case uint:
+		return toBadgerTypeUint(uint64(v)), nil
 	case json.Number:
 		if strings.Contains(string(v), ".") {
 			num, err := strconv.ParseFloat(string(v), 64)
@@ -230,25 +278,16 @@ func ToBadgerType(val interface{}) ([]byte, error) {
 			return ret, nil
 		}
 		num, err := strconv.ParseInt(string(v), 10, 64)
+		if err == nil {
+			return toBadgerTypeInt(num), nil
+		}
+		unum, err := strconv.ParseUint(string(v), 10, 64)
 		if err != nil {
-			unum, err := strconv.ParseUint(string(v), 10, 64)
-			if err != nil {
-				return nil, err
-			}
-			// okay this is a *big* number that can only be stored as an unsigned long
-			bits := make([]byte, 8)
-			binary.LittleEndian.PutUint64(bits, unum)
-			ret := append(append([]byte{typeInt}, bits...), 0)
-			return ret, nil
+			return nil, err
 		}
+		// okay this is a *big* number that can only be stored as an unsigned long
+		return toBadgerTypeUint(unum), nil
 
-		bits := make([]byte, 8)
-		binary.LittleEndian.PutUint64(bits, uint64(num))
-		for len(bits) > 1 && (bits[len(bits)-1] == 0 && bits[len(bits)-2] < 0x80) || (bits[len(bits)-1] == 0xFF && bits[len(bits)-2] >= 0x80) {
-			bits = bits[:len(bits)-1]
-		}
-		ret := append([]byte{typeInt}, bits...)
-		return ret, nil
 	case string:
 		ret := append([]byte{typeString}, []byte(v)...)
 		return ret, nil

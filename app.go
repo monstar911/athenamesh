@@ -9,6 +9,7 @@ import (
 
 	"github.com/dgraph-io/badger"
 	abcitypes "github.com/tendermint/tendermint/abci/types"
+	tmlog "github.com/tendermint/tendermint/libs/log"
 )
 
 type treeStateData struct {
@@ -19,9 +20,11 @@ type treeStateData struct {
 
 // AthenaStoreApplication defines our blockchain application and its behavior
 type AthenaStoreApplication struct {
-	db           *badger.DB
-	currentBatch *badger.Txn
-	treeState    treeStateData
+	db               *badger.DB
+	logger           tmlog.Logger
+	currentBatch     *badger.Txn
+	treeState        treeStateData
+	singleBlockEvent chan<- struct{}
 }
 
 type athenaTx struct {
@@ -48,8 +51,8 @@ const (
 var _ abcitypes.Application = (*AthenaStoreApplication)(nil)
 
 // NewAthenaStoreApplication create a new instance of AthenaStoreApplication
-func NewAthenaStoreApplication(db *badger.DB) *AthenaStoreApplication {
-	app := &AthenaStoreApplication{db: db}
+func NewAthenaStoreApplication(db *badger.DB, logger tmlog.Logger) *AthenaStoreApplication {
+	app := &AthenaStoreApplication{db: db, logger: logger}
 	app.init()
 	return app
 }
@@ -191,13 +194,33 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	return abcitypes.ResponseCheckTx{Code: 0}
 }
 
+func (app *AthenaStoreApplication) updateLastBlockHeight(txn *badger.Txn) error {
+	blockState := make(map[string]interface{})
+	blockState["lastBlockHeight"] = app.treeState.nextBlockHeight
+
+	encData, err := ToBadgerType(blockState)
+	if err != nil {
+		return err
+	}
+	return txn.Set([]byte("mesh/blockState"), encData)
+}
+
 // Commit Persist the application state. Later calls to Query can return proofs about the application state anchored in this Merkle root hash
 func (app *AthenaStoreApplication) Commit() abcitypes.ResponseCommit {
+	err := app.updateLastBlockHeight(app.currentBatch)
+	if err != nil {
+		app.logger.Error("Unexpected trying to update block state: " + err.Error())
+	}
+
 	app.currentBatch.Commit()
 	app.currentBatch = nil
 	if app.treeState.nextBlockHeight != 0 {
 		app.treeState.lastBlockHeight = app.treeState.nextBlockHeight
 		app.treeState.nextBlockHeight = 0
+	}
+	if app.singleBlockEvent != nil {
+		close(app.singleBlockEvent)
+		app.singleBlockEvent = nil
 	}
 	return abcitypes.ResponseCommit{}
 }
@@ -234,11 +257,28 @@ func (app *AthenaStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.R
 
 // InitChain Called once upon genesis
 func (app *AthenaStoreApplication) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
+	// create the root user
+	pubb, pvk, _ := ed25519.GenerateKey(nil)
+	err := app.db.Update(func(txn *badger.Txn) error {
+		rootLogin := &loginEntry{
+			Type:   rootUserTypeConfig,
+			Pubkey: pubb,
+		}
+		return app.createUser(txn, rootLogin)
+	})
+	if err != nil {
+		app.logger.Error("Unexpected trying to initialize the chain: " + err.Error())
+	}
+	app.logger.Info("root user successfully created with key: " + base64.RawStdEncoding.EncodeToString(pvk))
+
 	return abcitypes.ResponseInitChain{}
 }
 
 // BeginBlock Signals the beginning of a new block. Called prior to any DeliverTxs
 func (app *AthenaStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
+	if app.currentBatch != nil {
+		app.logger.Error("Unexpected: calling BeginBlock with an open transaction (transaction discarded)")
+	}
 	app.currentBatch = app.db.NewTransaction(true)
 	return abcitypes.ResponseBeginBlock{}
 }
