@@ -169,6 +169,7 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 func doNode(config *cfg.Config, logger tmlog.Logger) error {
 	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
 	dbopt := badger.DefaultOptions(dbPath)
+	dbopt.Logger = newBadgerLogger(logger)
 	if strings.HasPrefix(runtime.GOOS, "windows") {
 		dbopt = dbopt.WithTruncate(true)
 	}
