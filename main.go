@@ -116,25 +116,25 @@ func doInit(config *cfg.Config, logger tmlog.Logger) error {
 	return nil
 }
 
-func instantiateApp(app abci.Application, config *cfg.Config, configFile string, logger tmlog.Logger) (*nm.Node, error) {
+func instantiateApp(app abci.Application, config *cfg.Config, configFile string, logger tmlog.Logger) (tmlog.Logger, *nm.Node, error) {
 	// read config
 	config.RootDir = filepath.Dir(filepath.Dir(configFile))
 	viper.SetConfigFile(configFile)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, errors.Wrap(err, "viper failed to read config file")
+		return nil, nil, errors.Wrap(err, "viper failed to read config file")
 	}
 	if err := viper.Unmarshal(config); err != nil {
-		return nil, errors.Wrap(err, "viper failed to unmarshal config")
+		return nil, nil, errors.Wrap(err, "viper failed to unmarshal config")
 	}
 	if err := config.ValidateBasic(); err != nil {
-		return nil, errors.Wrap(err, "config is invalid")
+		return nil, nil, errors.Wrap(err, "config is invalid")
 	}
 
 	// create logger
 	var err error
 	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, cfg.DefaultLogLevel())
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse log level")
+		return nil, nil, errors.Wrap(err, "failed to parse log level")
 	}
 
 	// read private validator
@@ -146,7 +146,7 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 	// read node key
 	nodeKey, err := p2p.LoadNodeKey(config.NodeKeyFile())
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to load node's key")
+		return nil, nil, errors.Wrap(err, "failed to load node's key")
 	}
 
 	// create node
@@ -160,16 +160,17 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 		nm.DefaultMetricsProvider(config.Instrumentation),
 		logger)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create new Tendermint node")
+		return nil, nil, errors.Wrap(err, "failed to create new Tendermint node")
 	}
 
-	return node, nil
+	return logger, node, nil
 }
 
 func doNode(config *cfg.Config, logger tmlog.Logger) error {
 	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
 	dbopt := badger.DefaultOptions(dbPath)
-	dbopt.Logger = newBadgerLogger(logger)
+	badgerLogger := newBadgerLogger(logger)
+	dbopt.Logger = badgerLogger
 	if strings.HasPrefix(runtime.GOOS, "windows") {
 		dbopt = dbopt.WithTruncate(true)
 	}
@@ -183,10 +184,15 @@ func doNode(config *cfg.Config, logger tmlog.Logger) error {
 	flag.Parse()
 
 	configFile := filepath.Join(filepath.Dir(config.NodeKeyFile()), "config.toml")
-	node, err := instantiateApp(app, config, configFile, logger)
+	logger, node, err := instantiateApp(app, config, configFile, logger)
 	if err != nil {
 		return err
 	}
+
+	// the logger returned from instantiateApp has the configured log levels and filters applied to it,
+	// apply to everything else that uses a logger object
+	app.logger = logger
+	badgerLogger.logger = logger
 
 	node.Start()
 	defer func() {

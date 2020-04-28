@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	badgerlog "github.com/dgraph-io/badger"
 	tmlog "github.com/tendermint/tendermint/libs/log"
 )
 
@@ -32,6 +31,6 @@ func (log *badgerLogger) Debugf(msg string, vals ...interface{}) {
 	log.logger.Debug("badger: " + fullMsg)
 }
 
-func newBadgerLogger(logger tmlog.Logger) badgerlog.Logger {
+func newBadgerLogger(logger tmlog.Logger) *badgerLogger {
 	return &badgerLogger{logger: logger}
 }

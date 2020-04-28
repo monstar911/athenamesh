@@ -134,6 +134,9 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 
 func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
 	// TODO: stub.  All is permitted
+	if login == nil {
+		return ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))
+	}
 	return 0, ""
 }
 
@@ -157,10 +160,6 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if err != nil {
 		return abcitypes.ResponseDeliverTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
-	if user == nil {
-		return abcitypes.ResponseDeliverTx{Code: ErrorUnknownUser, Codespace: "athena",
-			Info: fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))}
-	}
 	code, info = app.isValid(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
@@ -182,10 +181,6 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	user, err := app.isAuth(tx)
 	if err != nil {
 		return abcitypes.ResponseCheckTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
-	}
-	if user == nil {
-		return abcitypes.ResponseCheckTx{Code: ErrorUnknownUser, Codespace: "athena",
-			Info: fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))}
 	}
 	code, info = app.isValid(tx, user)
 	if code != 0 {

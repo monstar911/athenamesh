@@ -49,11 +49,12 @@ var domainUserTypes = &domainUserTypeStore{
 }
 
 type loginEntry struct {
-	Type       *userTypeConfig
-	Name       string
-	Parent     *loginEntry
-	Pubkey     []byte
-	ParentSign []byte
+	Type       *userTypeConfig        // from path -- type of this login
+	Name       string                 // from path -- name of this login (may be different from stored in /auth)
+	Parent     *loginEntry            // from path -- parent to this login
+	Pubkey     []byte                 // from /auth key
+	ParentSign []byte                 // from /auth key
+	Attrs      map[string]interface{} // other /auth keys
 }
 
 func (login *loginEntry) path() string {
@@ -93,30 +94,28 @@ func (login *loginEntry) queryAccountData(txn *badger.Txn, path string, query st
 		return fmt.Errorf("Unexpected account object %v while fetching from %s", gAcctData, acctPath)
 	}
 
-	var gPubKey interface{}
-	gPubKey, ok = acctData["pubKey"]
-	if ok {
-		var pubKey []byte
-		pubKey, ok = gPubKey.([]byte)
-		if !ok {
-			return fmt.Errorf("Found unexpected non-string %v reading %s/auth/pubKey", gPubKey, path)
+	login.Pubkey = []byte{}
+	login.ParentSign = []byte{}
+	login.Attrs = make(map[string]interface{})
+	for key, val := range acctData {
+		switch key {
+		case "pubKey":
+			var pubKey []byte
+			pubKey, ok = val.([]byte)
+			if !ok {
+				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/pubKey", val, path)
+			}
+			login.Pubkey = pubKey
+		case "sign":
+			var parentSign []byte
+			parentSign, ok = val.([]byte)
+			if !ok {
+				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/sign", val, path)
+			}
+			login.ParentSign = parentSign
+		default:
+			login.Attrs[key] = val
 		}
-		login.Pubkey = pubKey
-	} else {
-		login.Pubkey = []byte{}
-	}
-
-	var gParentSign interface{}
-	gParentSign, ok = acctData["sign"]
-	if ok {
-		var parentSign []byte
-		parentSign, ok = gParentSign.([]byte)
-		if !ok {
-			return fmt.Errorf("Found unexpected non-string %v reading %s/auth/sign", gParentSign, path)
-		}
-		login.ParentSign = parentSign
-	} else {
-		login.ParentSign = []byte{}
 	}
 
 	return nil
@@ -131,8 +130,10 @@ func (login *loginEntry) assembleAccountData() map[string]interface{} {
 	if len(login.ParentSign) > 0 {
 		result["sign"] = login.ParentSign
 	}
-	if login.Name != "" {
-		result["name"] = login.Name
+	if login.Attrs != nil {
+		for key, val := range login.Attrs {
+			result[key] = val
+		}
 	}
 
 	return nil

@@ -19,14 +19,17 @@ func verifySignature(pubKey []byte, message []byte, sig []byte) bool {
 
 func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 
-	var login *loginEntry
+	var login *loginEntry = nil
 
 	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here
 	err := app.db.View(func(txn *badger.Txn) error {
 		keyQuery := "keymap/" + base64.RawStdEncoding.EncodeToString(tx.Pkey)
 		gKeyPath, err := GetBadgerVal(txn, keyQuery)
-		if err != nil || gKeyPath == nil {
+		if err != nil {
 			return err // error or no key found
+		}
+		if gKeyPath == nil {
+			return nil // no key found
 		}
 
 		keyPath, ok := gKeyPath.(string)
