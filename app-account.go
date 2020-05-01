@@ -23,7 +23,7 @@ func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 
 	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here
 	err := app.db.View(func(txn *badger.Txn) error {
-		keyQuery := "keymap/" + base64.RawStdEncoding.EncodeToString(tx.Pkey)
+		keyQuery := "keymap/" + base64.RawURLEncoding.EncodeToString(tx.Pkey)
 		gKeyPath, err := GetBadgerVal(txn, keyQuery)
 		if err != nil {
 			return err // error or no key found
@@ -53,8 +53,8 @@ func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 		}
 		if !bytes.Equal(login.Pubkey, tx.Pkey) {
 			return fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
-				base64.RawStdEncoding.EncodeToString(tx.Pkey),
-				base64.RawStdEncoding.EncodeToString(login.Pubkey))
+				base64.RawURLEncoding.EncodeToString(tx.Pkey),
+				base64.RawURLEncoding.EncodeToString(login.Pubkey))
 		}
 
 		if parentPath != "" {

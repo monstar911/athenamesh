@@ -46,6 +46,8 @@ const (
 	ErrorUnexpected
 	// ErrorUnknownUser did not recognize the public key
 	ErrorUnknownUser
+	// ErrorUnauth does not have permission to do the requested action
+	ErrorUnauth
 )
 
 var _ abcitypes.Application = (*AthenaStoreApplication)(nil)
@@ -130,14 +132,6 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	}
 
 	return &dec, ErrorOk, ""
-}
-
-func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
-	// TODO: stub.  All is permitted
-	if login == nil {
-		return ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawStdEncoding.EncodeToString(tx.Pkey))
-	}
-	return 0, ""
 }
 
 func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
@@ -264,7 +258,7 @@ func (app *AthenaStoreApplication) InitChain(req abcitypes.RequestInitChain) abc
 	if err != nil {
 		app.logger.Error("Unexpected trying to initialize the chain: " + err.Error())
 	}
-	app.logger.Info("root user successfully created with key: " + base64.RawStdEncoding.EncodeToString(pvk))
+	app.logger.Info("root user successfully created with key: " + base64.RawURLEncoding.EncodeToString(pvk))
 
 	return abcitypes.ResponseInitChain{}
 }

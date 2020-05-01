@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strings"
@@ -94,30 +95,43 @@ func (login *loginEntry) queryAccountData(txn *badger.Txn, path string, query st
 		return fmt.Errorf("Unexpected account object %v while fetching from %s", gAcctData, acctPath)
 	}
 
+	return login.decodeAccountData(acctData, path)
+}
+
+func (login *loginEntry) decodeAccountData(acctData map[string]interface{}, path string) error {
 	login.Pubkey = []byte{}
 	login.ParentSign = []byte{}
 	login.Attrs = make(map[string]interface{})
 	for key, val := range acctData {
 		switch key {
 		case "pubKey":
-			var pubKey []byte
-			pubKey, ok = val.([]byte)
-			if !ok {
+			if pubKey, ok := val.([]byte); ok {
+				login.Pubkey = pubKey
+			} else if pubKey, ok := val.(string); ok {
+				decPubKey, err := base64.RawURLEncoding.DecodeString(pubKey)
+				if err != nil {
+					return err
+				}
+				login.Pubkey = decPubKey
+			} else {
 				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/pubKey", val, path)
 			}
-			login.Pubkey = pubKey
 		case "sign":
-			var parentSign []byte
-			parentSign, ok = val.([]byte)
-			if !ok {
+			if parentSign, ok := val.([]byte); ok {
+				login.ParentSign = parentSign
+			} else if parentSign, ok := val.(string); ok {
+				decParentSign, err := base64.RawURLEncoding.DecodeString(parentSign)
+				if err != nil {
+					return err
+				}
+				login.ParentSign = decParentSign
+			} else {
 				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/sign", val, path)
 			}
-			login.ParentSign = parentSign
 		default:
 			login.Attrs[key] = val
 		}
 	}
-
 	return nil
 }
 

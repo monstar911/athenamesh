@@ -77,7 +77,7 @@ func handlePubkeySymlinkChange(txn *badger.Txn, srcPath string, linkPath string,
 
 	if !bytes.Equal(oldPubKey, newPubKey) {
 		if len(oldPubKey) > 0 {
-			destPath := destPrefix + base64.RawStdEncoding.EncodeToString(oldPubKey)
+			destPath := destPrefix + base64.RawURLEncoding.EncodeToString(oldPubKey)
 			gOldLinkPath, err := GetBadgerVal(txn, destPath)
 			if err == nil {
 				if oldLinkPath, ok := gOldLinkPath.(string); ok {
@@ -91,7 +91,7 @@ func handlePubkeySymlinkChange(txn *badger.Txn, srcPath string, linkPath string,
 			}
 		}
 		if len(newPubKey) > 0 {
-			destPath := destPrefix + base64.RawStdEncoding.EncodeToString(newPubKey)
+			destPath := destPrefix + base64.RawURLEncoding.EncodeToString(newPubKey)
 			gOldLinkPath, err := GetBadgerVal(txn, destPath)
 			if err == nil && gOldLinkPath != nil {
 				return errors.New("Unexpected: there is already a symlink declared at " + destPath)
