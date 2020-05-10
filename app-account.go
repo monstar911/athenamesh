@@ -19,6 +19,9 @@ func verifySignature(pubKey []byte, message []byte, sig []byte) bool {
 
 func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 
+	if tx.Pkey == nil || tx.Sign == nil {
+		return nil, nil // no authentication provided
+	}
 	var login *loginEntry = nil
 
 	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here

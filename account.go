@@ -56,6 +56,8 @@ type loginEntry struct {
 	Pubkey     []byte                 // from /auth key
 	ParentSign []byte                 // from /auth key
 	Attrs      map[string]interface{} // other /auth keys
+	Created    int64
+	Expires    int64
 }
 
 func (login *loginEntry) path() string {
@@ -95,10 +97,10 @@ func (login *loginEntry) queryAccountData(txn *badger.Txn, path string, query st
 		return fmt.Errorf("Unexpected account object %v while fetching from %s", gAcctData, acctPath)
 	}
 
-	return login.decodeAccountData(acctData, path)
+	return login.decodeAccountData(acctData, path, false)
 }
 
-func (login *loginEntry) decodeAccountData(acctData map[string]interface{}, path string) error {
+func (login *loginEntry) decodeAccountData(acctData map[string]interface{}, path string, fromUser bool) error {
 	login.Pubkey = []byte{}
 	login.ParentSign = []byte{}
 	login.Attrs = make(map[string]interface{})
@@ -128,6 +130,20 @@ func (login *loginEntry) decodeAccountData(acctData map[string]interface{}, path
 			} else {
 				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/sign", val, path)
 			}
+		case "created":
+			if !fromUser {
+				if iCreated, ok := NumberToInt64(val); ok {
+					login.Created = iCreated
+				} else {
+					return fmt.Errorf("Found unexpected non-string %v reading %s/auth/created", val, path)
+				}
+			}
+		case "expires":
+			if iExpires, ok := NumberToInt64(val); ok {
+				login.Expires = iExpires
+			} else {
+				return fmt.Errorf("Found unexpected non-string %v reading %s/auth/created", val, path)
+			}
 		default:
 			login.Attrs[key] = val
 		}
@@ -143,6 +159,36 @@ func (login *loginEntry) assembleAccountData() map[string]interface{} {
 	}
 	if len(login.ParentSign) > 0 {
 		result["sign"] = login.ParentSign
+	}
+	if login.Created > 0 {
+		result["created"] = login.Created
+	}
+	if login.Expires > 0 {
+		result["expires"] = login.Expires
+	}
+	if login.Attrs != nil {
+		for key, val := range login.Attrs {
+			result[key] = val
+		}
+	}
+
+	return nil
+}
+
+func (login *loginEntry) assembleQueryData() map[string]interface{} {
+	result := make(map[string]interface{})
+
+	if len(login.Pubkey) > 0 {
+		result["pubKey"] = base64.RawURLEncoding.EncodeToString(login.Pubkey)
+	}
+	if len(login.ParentSign) > 0 {
+		result["sign"] = base64.RawURLEncoding.EncodeToString(login.ParentSign)
+	}
+	if login.Created > 0 {
+		result["created"] = login.Created
+	}
+	if login.Expires > 0 {
+		result["expires"] = login.Expires
 	}
 	if login.Attrs != nil {
 		for key, val := range login.Attrs {

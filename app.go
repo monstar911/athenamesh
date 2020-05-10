@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -30,7 +31,7 @@ type AthenaStoreApplication struct {
 type athenaTx struct {
 	Pkey []byte
 	Sign []byte
-	Msg  map[string]interface{}
+	Msg  interface{}
 }
 
 const (
@@ -38,8 +39,6 @@ const (
 	ErrorOk = iota
 	// ErrorTxTooShort the transaction does not include the minimum pk + signature
 	ErrorTxTooShort
-	// ErrorTxBadJSON the body of the transaction is not well-formed
-	ErrorTxBadJSON
 	// ErrorTxBadSign the signature of this transaction does not match the PKey
 	ErrorTxBadSign
 	// ErrorUnexpected an unexpected condition was encountered
@@ -48,6 +47,8 @@ const (
 	ErrorUnknownUser
 	// ErrorUnauth does not have permission to do the requested action
 	ErrorUnauth
+	// ErrorBadFormat has a request that is not readable
+	ErrorBadFormat
 )
 
 var _ abcitypes.Application = (*AthenaStoreApplication)(nil)
@@ -112,31 +113,24 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	if len(tx) < 96 {
 		return nil, ErrorTxTooShort, "Tx too short"
 	}
-	dec.Pkey = tx[0:32]
-	dec.Sign = tx[32:96]
+	var body []byte
+	if !bytes.Equal(tx[0:96], make([]byte, 96)) {
+		dec.Pkey = tx[0:32]
+		dec.Sign = tx[32:96]
 
-	body := tx[96:]
-	if !ed25519.Verify(dec.Pkey, body, dec.Sign) {
-		return nil, ErrorTxBadSign, "Transaction signature invalid"
+		body = tx[96:]
+		if !ed25519.Verify(dec.Pkey, body, dec.Sign) {
+			return nil, ErrorTxBadSign, "Transaction signature invalid"
+		}
 	}
 
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.UseNumber()
-	var json interface{}
-	if err := decoder.Decode(&json); err != nil {
-		return nil, ErrorTxBadJSON, err.Error()
-	}
-	var ok bool
-	if dec.Msg, ok = json.(map[string]interface{}); !ok {
-		return nil, ErrorTxBadJSON, "Transaction must not be a JSON literal"
+	if err := decoder.Decode(&dec.Msg); err != nil {
+		return nil, ErrorBadFormat, err.Error()
 	}
 
 	return &dec, ErrorOk, ""
-}
-
-func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
-	// TODO: stub.  Nothing executed
-	return 0, ""
 }
 
 // SetOption Set non-consensus critical application specific options
@@ -150,15 +144,19 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
+	msg, ok := tx.Msg.(map[string]interface{})
+	if !ok {
+		return abcitypes.ResponseDeliverTx{Code: ErrorBadFormat, Codespace: "athena", Info: "Transactions must be a valid JSON object"}
+	}
 	user, err := app.isAuth(tx)
 	if err != nil {
 		return abcitypes.ResponseDeliverTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
-	code, info = app.isValid(tx, user)
+	code, info = app.isValid(tx, msg, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.executeTx(tx, user)
+	code, info = app.executeTx(tx, msg, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -172,11 +170,15 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
+	msg, ok := tx.Msg.(map[string]interface{})
+	if !ok {
+		return abcitypes.ResponseCheckTx{Code: ErrorBadFormat, Codespace: "athena", Info: "Transactions must be a valid JSON object"}
+	}
 	user, err := app.isAuth(tx)
 	if err != nil {
 		return abcitypes.ResponseCheckTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
-	code, info = app.isValid(tx, user)
+	code, info = app.isValid(tx, msg, user)
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -216,32 +218,55 @@ func (app *AthenaStoreApplication) Commit() abcitypes.ResponseCommit {
 
 // Query Query for data from the application at current or past height
 func (app *AthenaStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.ResponseQuery {
-	/*
-		var resp abcitypes.ResponseQuery
-		resp.Key = req.Data
-		err := app.db.View(func(txn *badger.Txn) error {
-			item, err := txn.Get(req.Data)
-			if err != nil && err != badger.ErrKeyNotFound {
-				return err
+	tx, code, info := app.unpackTx(req.Data)
+	if code != 0 {
+		return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
+	}
+	user, err := app.isAuth(tx)
+	if err != nil {
+		return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
+	}
+
+	var response interface{}
+	switch msg := tx.Msg.(type) {
+	case string:
+		code, info, response = app.doQuery(tx, msg, user)
+	case []interface{}:
+		result := make(map[string]interface{})
+		var val interface{}
+		for _, gKey := range msg {
+			key, ok := gKey.(string)
+			if !ok {
+				return abcitypes.ResponseQuery{Code: ErrorBadFormat, Codespace: "athena", Info: "Queries must be a JSON string array or string literal"}
 			}
-			if err == badger.ErrKeyNotFound {
-				resp.Log = "does not exist"
-			} else {
-				return item.Value(func(val []byte) error {
-					resp.Log = "exists"
-					resp.Value = val
-					return nil
-				})
+			code, info, val = app.doQuery(tx, key, user)
+			if code != 0 {
+				return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
 			}
-			return nil
-		})
-		if err != nil {
-			return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
+			result[key] = val
 		}
-		return resp
-	*/
-	// TODO: stub.  Returns nothing
-	return abcitypes.ResponseQuery{Code: 0}
+		response = result
+	case []string:
+		result := make(map[string]interface{})
+		var val interface{}
+		for _, key := range msg {
+			code, info, val = app.doQuery(tx, key, user)
+			if code != 0 {
+				return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
+			}
+			result[key] = val
+		}
+		response = result
+	default:
+		return abcitypes.ResponseQuery{Code: ErrorBadFormat, Codespace: "athena", Info: "Queries must be a JSON string array or string literal"}
+	}
+
+	jsonValue, err := json.Marshal(response)
+	if err != nil {
+		return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
+	}
+
+	return abcitypes.ResponseQuery{Code: 0, Value: jsonValue}
 }
 
 // InitChain Called once upon genesis
