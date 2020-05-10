@@ -2,8 +2,6 @@
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -31,20 +29,7 @@ import (
 	tmtime "github.com/tendermint/tendermint/types/time"
 )
 
-func retrieveDefaultConfig() (interface{}, error) {
-	file, err := Resources.Open("default_config.json")
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	decoder := json.NewDecoder(bufio.NewReader(file))
-	var result interface{}
-	err = decoder.Decode(&result)
-	return result, err
-}
-
-// DefaultConfig represents the default configuration when none is available
-var DefaultConfig interface{}
+var firstCycleComplete chan struct{}
 
 func doInit(config *cfg.Config, logger tmlog.Logger) error {
 	// private validator
