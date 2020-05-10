@@ -90,37 +90,25 @@ func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 	return login, err
 }
 
-func (app *AthenaStoreApplication) createUser(txn *badger.Txn, login *loginEntry) error {
-	if login == nil {
-		return errors.New("Attempt to create an empty user")
+func (app *AthenaStoreApplication) createRootUser(txn *badger.Txn, pubkey []byte) error {
+	login := &loginEntry{
+		Type:   rootUserTypeConfig,
+		Pubkey: pubkey,
 	}
 	path := login.path()
-	if path == "" {
+	if path == "" || login.Parent != nil {
 		return errors.New("Attempt to create an invalid user")
-	}
-	if login.Parent != nil {
-		parentLogin := login.Parent
-		parentPath := parentLogin.path()
-		err := parentLogin.queryAccountData(txn, parentPath, parentPath)
-		if err != nil {
-			return err
-		}
-		if len(parentLogin.Pubkey) == 0 {
-			return fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
-		}
-		if !verifySignature(parentLogin.Pubkey, login.Pubkey, login.ParentSign) {
-			return errors.New("Account is a child object but its signature was failed by its parent")
-		}
 	}
 
 	acctPath := path + "/auth"
 	gAcctData, err := GetBadgerVal(txn, acctPath)
-	if gAcctData != nil || err != nil {
+	if err != nil {
+		return err
+	}
+	if gAcctData != nil {
 		return errors.New("Account already exists")
 	}
 
 	newAcctData := login.assembleAccountData()
-	err = app.setKey(txn, acctPath, newAcctData)
-
-	return err
+	return app.setKey(txn, acctPath, newAcctData)
 }

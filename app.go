@@ -60,6 +60,21 @@ func NewAthenaStoreApplication(db *badger.DB, logger tmlog.Logger) *AthenaStoreA
 	return app
 }
 
+// InitChain Called once upon genesis
+func (app *AthenaStoreApplication) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
+	// create the root user
+	pubb, pvk, _ := ed25519.GenerateKey(nil)
+	err := app.db.Update(func(txn *badger.Txn) error {
+		return app.createRootUser(txn, pubb)
+	})
+	if err != nil {
+		app.logger.Error("Unexpected trying to initialize the chain: " + err.Error())
+	}
+	app.logger.Info("root user successfully created with key: " + base64.RawURLEncoding.EncodeToString(pvk))
+
+	return abcitypes.ResponseInitChain{}
+}
+
 func (app *AthenaStoreApplication) loadTreeState() error {
 	// load our current status
 	return app.db.View(func(txn *badger.Txn) error {
@@ -106,6 +121,15 @@ func (app *AthenaStoreApplication) Info(req abcitypes.RequestInfo) abcitypes.Res
 		LastBlockHeight:  app.treeState.lastBlockHeight,
 		LastBlockAppHash: app.treeState.lastBlockHash,
 	}
+}
+
+// BeginBlock Signals the beginning of a new block. Called prior to any DeliverTxs
+func (app *AthenaStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
+	if app.currentBatch != nil {
+		app.logger.Error("Unexpected: calling BeginBlock with an open transaction (transaction discarded)")
+	}
+	app.currentBatch = app.db.NewTransaction(true)
+	return abcitypes.ResponseBeginBlock{}
 }
 
 func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, string) {
@@ -196,26 +220,6 @@ func (app *AthenaStoreApplication) updateLastBlockHeight(txn *badger.Txn) error 
 	return txn.Set([]byte("mesh/blockState"), encData)
 }
 
-// Commit Persist the application state. Later calls to Query can return proofs about the application state anchored in this Merkle root hash
-func (app *AthenaStoreApplication) Commit() abcitypes.ResponseCommit {
-	err := app.updateLastBlockHeight(app.currentBatch)
-	if err != nil {
-		app.logger.Error("Unexpected trying to update block state: " + err.Error())
-	}
-
-	app.currentBatch.Commit()
-	app.currentBatch = nil
-	if app.treeState.nextBlockHeight != 0 {
-		app.treeState.lastBlockHeight = app.treeState.nextBlockHeight
-		app.treeState.nextBlockHeight = 0
-	}
-	if app.singleBlockEvent != nil {
-		close(app.singleBlockEvent)
-		app.singleBlockEvent = nil
-	}
-	return abcitypes.ResponseCommit{}
-}
-
 // Query Query for data from the application at current or past height
 func (app *AthenaStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.ResponseQuery {
 	tx, code, info := app.unpackTx(req.Data)
@@ -269,36 +273,33 @@ func (app *AthenaStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.R
 	return abcitypes.ResponseQuery{Code: 0, Value: jsonValue}
 }
 
-// InitChain Called once upon genesis
-func (app *AthenaStoreApplication) InitChain(req abcitypes.RequestInitChain) abcitypes.ResponseInitChain {
-	// create the root user
-	pubb, pvk, _ := ed25519.GenerateKey(nil)
-	err := app.db.Update(func(txn *badger.Txn) error {
-		rootLogin := &loginEntry{
-			Type:   rootUserTypeConfig,
-			Pubkey: pubb,
-		}
-		return app.createUser(txn, rootLogin)
-	})
-	if err != nil {
-		app.logger.Error("Unexpected trying to initialize the chain: " + err.Error())
-	}
-	app.logger.Info("root user successfully created with key: " + base64.RawURLEncoding.EncodeToString(pvk))
-
-	return abcitypes.ResponseInitChain{}
-}
-
-// BeginBlock Signals the beginning of a new block. Called prior to any DeliverTxs
-func (app *AthenaStoreApplication) BeginBlock(req abcitypes.RequestBeginBlock) abcitypes.ResponseBeginBlock {
-	if app.currentBatch != nil {
-		app.logger.Error("Unexpected: calling BeginBlock with an open transaction (transaction discarded)")
-	}
-	app.currentBatch = app.db.NewTransaction(true)
-	return abcitypes.ResponseBeginBlock{}
-}
-
 // EndBlock Signals the end of a block. Called after all transactions, prior to each Commit
 func (app *AthenaStoreApplication) EndBlock(req abcitypes.RequestEndBlock) abcitypes.ResponseEndBlock {
 	app.treeState.nextBlockHeight = req.Height
 	return abcitypes.ResponseEndBlock{}
+}
+
+// Commit Persist the application state. Later calls to Query can return proofs about the application state anchored in this Merkle root hash
+func (app *AthenaStoreApplication) Commit() abcitypes.ResponseCommit {
+	err := app.updateLastBlockHeight(app.currentBatch)
+	if err != nil {
+		app.logger.Error("Unexpected trying to update block state: " + err.Error())
+	}
+
+	app.currentBatch.Commit()
+	app.currentBatch = nil
+	if app.treeState.nextBlockHeight != 0 {
+		app.treeState.lastBlockHeight = app.treeState.nextBlockHeight
+		app.treeState.nextBlockHeight = 0
+	}
+	if app.singleBlockEvent != nil {
+		close(app.singleBlockEvent)
+		app.singleBlockEvent = nil
+	}
+	// if we're set to only run once then firstCycleComplete will be non-nil; signal that we've just completed a Commit
+	if firstCycleComplete != nil {
+		close(firstCycleComplete)
+		firstCycleComplete = nil
+	}
+	return abcitypes.ResponseCommit{}
 }

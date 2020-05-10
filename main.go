@@ -113,6 +113,10 @@ func doInit(config *cfg.Config, logger tmlog.Logger) error {
 		logger.Info("Generated config file", "path", configFile)
 	}
 
+	log.Print("")
+	log.Print("Initial configuration constructed.")
+	log.Printf("Examine the configuration files in %s to customize the behavior of the chain", filepath.Dir(nodeKeyFile))
+	log.Print("Execute athenamesh in either \"once\" or \"node\" to initialize the new chain")
 	return nil
 }
 
@@ -166,7 +170,7 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 	return logger, node, nil
 }
 
-func doNode(config *cfg.Config, logger tmlog.Logger) error {
+func doNode(config *cfg.Config, logger tmlog.Logger, doOnce bool) error {
 	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
 	dbopt := badger.DefaultOptions(dbPath)
 	badgerLogger := newBadgerLogger(logger)
@@ -194,15 +198,23 @@ func doNode(config *cfg.Config, logger tmlog.Logger) error {
 	app.logger = logger
 	badgerLogger.logger = logger
 
+	if doOnce {
+		firstCycleComplete = make(chan struct{}, 1)
+	}
+
 	node.Start()
 	defer func() {
 		node.Stop()
 		node.Wait()
 	}()
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
+	if doOnce {
+		<-firstCycleComplete
+	} else {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+	}
 	return nil
 }
 
@@ -226,38 +238,15 @@ func main() {
 			rootErrors(doInit(config, logger))
 			return
 		case "node":
-			rootErrors(doNode(config, logger))
+			rootErrors(doNode(config, logger, false))
+			return
+		case "once":
+			rootErrors(doNode(config, logger, true))
 			return
 		}
 	}
-	log.Printf("athenamesh.exe <command>")
-	log.Printf("  init - create a new (empty) database")
-	log.Printf("  node - operate a node")
-	/*
-		DefaultConfig, err = retrieveDefaultConfig()
-		if err != nil {
-			panic(err.Error())
-		}
-	*/
-	/*
-		//	priv := "e06d3183d14159228433ed599221b80bd0a5ce8352e4bdf0262f76786ef1c74db7e7a9fea2c0eb269d61e3b38e450a22e754941ac78479d6c54e1faf6037881d"
-		//	pub := "b7e7a9fea2c0eb269d61e3b38e450a22e754941ac78479d6c54e1faf6037881d"
-		//sig := "6834284b6b24c3204eb2fea824d82f88883a3d95e8b4a21b8c0ded553d17d17ddf9a8a7104b1258f30bed3787e6cb896fca78c58f8e03b5f18f14951a87d9a08"
-		// d := hex.EncodeToString([]byte(priv))
-		pubb, pvk, _ := ed25519.GenerateKey(nil)
-		pvk2 := ed25519.NewKeyFromSeed(pvk[:32])
-		//	privb, _ := hex.DecodeString(priv)
-		//pvk := ed25519.PrivateKey(privb)
-		buffer := []byte("4:salt6:foobar3:seqi1e1:v12:Hello World!")
-		sigb := ed25519.Sign(pvk, buffer)
-		//pubb, _ := hex.DecodeString(pub)
-		//sigb2, _ := hex.DecodeString(sig)
-		log.Println(ed25519.Verify(pubb, buffer, sigb))
-		log.Printf("%x\n", pvk)
-		log.Printf("%x\n", pvk.Public())
-		log.Printf("%x\n", pubb)
-		log.Printf("%x\n", sigb)
-		log.Printf("%x\n", pvk2)
-		//log.Printf("%x\n", sigb2)
-	*/
+	log.Print("athenamesh.exe <command>")
+	log.Print("  init - create a new (empty) database.  This will create a new \"universe\"")
+	log.Print("  once - operate a node for one cycle only (useful when creating a new \"universe\")")
+	log.Print("  node - operate a node")
 }
