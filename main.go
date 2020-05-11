@@ -159,14 +159,14 @@ func instantiateApp(app abci.Application, config *cfg.Config, logger tmlog.Logge
 	return node, nil
 }
 
-func doNode(config *cfg.Config, logger tmlog.Logger, doOnce bool) error {
+func prepareNode(config *cfg.Config, logger tmlog.Logger) (*nm.Node, *badger.DB, error) {
 	configFile := filepath.Join(filepath.Dir(config.NodeKeyFile()), "config.toml")
 
 	var err error
 	flag.Parse()
 	logger, err = readAppConfig(config, configFile, logger)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
@@ -178,65 +178,81 @@ func doNode(config *cfg.Config, logger tmlog.Logger, doOnce bool) error {
 	}
 	db, err := badger.Open(dbopt)
 	if err != nil {
-		return errors.Wrap(err, "failed to open badger db")
+		return nil, nil, errors.Wrap(err, "failed to open badger db")
 	}
-	defer db.Close()
 	app := NewAthenaStoreApplication(db, logger)
 
 	node, err := instantiateApp(app, config, logger)
-	if err != nil {
-		return err
-	}
 
-	if doOnce {
-		firstCycleComplete = make(chan struct{}, 1)
-	}
-
-	node.Start()
-	defer func() {
-		node.Stop()
-		node.Wait()
-	}()
-
-	if doOnce {
-		<-firstCycleComplete
-	} else {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-		<-c
-	}
-	return nil
+	return node, db, err
 }
 
-func rootErrors(err error) {
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal error: %v", err.Error())
-		os.Exit(1)
-	}
-}
+type mainAction int
+
+const (
+	actionNone mainAction = iota
+	actionNode
+	actionOnce
+)
 
 func main() {
 	config := cfg.DefaultConfig()
 	logger := tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
-	//rootErrors(doNode(config, logger, true))
-	//return
 
+	mainAction := actionNone
 	args := os.Args[1:]
 	if len(args) > 0 {
 		switch args[0] {
 		case "init":
-			rootErrors(doInit(config, logger))
+			err := doInit(config, logger)
+			if err != nil {
+				logger.Error(err.Error())
+				os.Exit(1)
+			}
 			return
 		case "node":
-			rootErrors(doNode(config, logger, false))
-			return
+			mainAction = actionNode
 		case "once":
-			rootErrors(doNode(config, logger, true))
-			return
+			mainAction = actionOnce
+		default:
+			logger.Error(fmt.Sprintf("action \"%s\" is unrecognized", args[0]))
 		}
 	}
-	logger.Error("athenamesh.exe <command>")
-	logger.Error("  init - create a new (empty) database.  This will create a new \"universe\"")
-	logger.Error("  once - operate a node for one cycle only (useful when creating a new \"universe\")")
-	logger.Error("  node - operate a node")
+	if mainAction == actionNone {
+		logger.Error("athenamesh.exe <command>")
+		logger.Error("  init - create a new (empty) database.  This will create a new \"universe\"")
+		logger.Error("  once - operate a node for one cycle only (useful when creating a new \"universe\")")
+		logger.Error("  node - operate a node")
+		return
+	}
+
+	node, db, err := prepareNode(config, logger)
+	if err != nil {
+		logger.Error(err.Error())
+		if db != nil {
+			db.Close()
+		}
+		os.Exit(1)
+	}
+
+	if mainAction == actionOnce {
+		firstCycleComplete = make(chan struct{}, 1)
+	}
+
+	// start the tendermint node here, while prepping to shutdown properly
+	node.Start()
+	defer func() {
+		node.Stop()
+		node.Wait()
+		db.Close()
+	}()
+
+	switch mainAction {
+	case actionOnce:
+		<-firstCycleComplete
+	case actionNode:
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+		<-c
+	}
 }
