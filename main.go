@@ -4,7 +4,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -98,33 +97,38 @@ func doInit(config *cfg.Config, logger tmlog.Logger) error {
 		logger.Info("Generated config file", "path", configFile)
 	}
 
-	log.Print("")
-	log.Print("Initial configuration constructed.")
-	log.Printf("Examine the configuration files in %s to customize the behavior of the chain", filepath.Dir(nodeKeyFile))
-	log.Print("Execute athenamesh in either \"once\" or \"node\" to initialize the new chain")
+	logger.Info("")
+	logger.Info("Initial configuration constructed.", "path", filepath.Dir(nodeKeyFile))
+	logger.Info("Examine the configuration files to customize the behavior of the chain")
+	logger.Info("Execute athenamesh in either \"once\" or \"node\" to initialize the new chain")
 	return nil
 }
 
-func instantiateApp(app abci.Application, config *cfg.Config, configFile string, logger tmlog.Logger) (tmlog.Logger, *nm.Node, error) {
+func readAppConfig(config *cfg.Config, configFile string, logger tmlog.Logger) (tmlog.Logger, error) {
 	// read config
 	config.RootDir = filepath.Dir(filepath.Dir(configFile))
 	viper.SetConfigFile(configFile)
 	if err := viper.ReadInConfig(); err != nil {
-		return nil, nil, errors.Wrap(err, "viper failed to read config file")
+		return nil, errors.Wrap(err, "viper failed to read config file")
 	}
 	if err := viper.Unmarshal(config); err != nil {
-		return nil, nil, errors.Wrap(err, "viper failed to unmarshal config")
+		return nil, errors.Wrap(err, "viper failed to unmarshal config")
 	}
 	if err := config.ValidateBasic(); err != nil {
-		return nil, nil, errors.Wrap(err, "config is invalid")
+		return nil, errors.Wrap(err, "config is invalid")
 	}
 
 	// create logger
 	var err error
 	logger, err = tmflags.ParseLogLevel(config.LogLevel, logger, cfg.DefaultLogLevel())
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to parse log level")
+		return nil, errors.Wrap(err, "failed to parse log level")
 	}
+
+	return logger, nil
+}
+
+func instantiateApp(app abci.Application, config *cfg.Config, logger tmlog.Logger) (*nm.Node, error) {
 
 	// read private validator
 	pv := privval.LoadFilePV(
@@ -135,7 +139,7 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 	// read node key
 	nodeKey, err := p2p.LoadNodeKey(config.NodeKeyFile())
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to load node's key")
+		return nil, errors.Wrap(err, "failed to load node's key")
 	}
 
 	// create node
@@ -149,13 +153,22 @@ func instantiateApp(app abci.Application, config *cfg.Config, configFile string,
 		nm.DefaultMetricsProvider(config.Instrumentation),
 		logger)
 	if err != nil {
-		return nil, nil, errors.Wrap(err, "failed to create new Tendermint node")
+		return nil, errors.Wrap(err, "failed to create new Tendermint node")
 	}
 
-	return logger, node, nil
+	return node, nil
 }
 
 func doNode(config *cfg.Config, logger tmlog.Logger, doOnce bool) error {
+	configFile := filepath.Join(filepath.Dir(config.NodeKeyFile()), "config.toml")
+
+	var err error
+	flag.Parse()
+	logger, err = readAppConfig(config, configFile, logger)
+	if err != nil {
+		return err
+	}
+
 	dbPath := filepath.Join(filepath.Dir(config.PrivValidatorStateFile()), "store.db")
 	dbopt := badger.DefaultOptions(dbPath)
 	badgerLogger := newBadgerLogger(logger)
@@ -170,18 +183,10 @@ func doNode(config *cfg.Config, logger tmlog.Logger, doOnce bool) error {
 	defer db.Close()
 	app := NewAthenaStoreApplication(db, logger)
 
-	flag.Parse()
-
-	configFile := filepath.Join(filepath.Dir(config.NodeKeyFile()), "config.toml")
-	logger, node, err := instantiateApp(app, config, configFile, logger)
+	node, err := instantiateApp(app, config, logger)
 	if err != nil {
 		return err
 	}
-
-	// the logger returned from instantiateApp has the configured log levels and filters applied to it,
-	// apply to everything else that uses a logger object
-	app.logger = logger
-	badgerLogger.logger = logger
 
 	if doOnce {
 		firstCycleComplete = make(chan struct{}, 1)
@@ -213,7 +218,7 @@ func rootErrors(err error) {
 func main() {
 	config := cfg.DefaultConfig()
 	logger := tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
-	//rootErrors(doNode(config, logger))
+	//rootErrors(doNode(config, logger, true))
 	//return
 
 	args := os.Args[1:]
@@ -230,8 +235,8 @@ func main() {
 			return
 		}
 	}
-	log.Print("athenamesh.exe <command>")
-	log.Print("  init - create a new (empty) database.  This will create a new \"universe\"")
-	log.Print("  once - operate a node for one cycle only (useful when creating a new \"universe\")")
-	log.Print("  node - operate a node")
+	logger.Error("athenamesh.exe <command>")
+	logger.Error("  init - create a new (empty) database.  This will create a new \"universe\"")
+	logger.Error("  once - operate a node for one cycle only (useful when creating a new \"universe\")")
+	logger.Error("  node - operate a node")
 }

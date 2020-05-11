@@ -218,7 +218,7 @@ func toBadgerTypeUint(val uint64) []byte {
 func toBadgerTypeInt(val int64) []byte {
 	bits := make([]byte, 8)
 	binary.LittleEndian.PutUint64(bits, uint64(val))
-	for len(bits) > 1 && (bits[len(bits)-1] == 0 && bits[len(bits)-2] < 0x80) || (bits[len(bits)-1] == 0xFF && bits[len(bits)-2] >= 0x80) {
+	for len(bits) > 1 && ((bits[len(bits)-1] == 0 && bits[len(bits)-2] < 0x80) || (bits[len(bits)-1] == 0xFF && bits[len(bits)-2] >= 0x80)) {
 		bits = bits[:len(bits)-1]
 	}
 	return append([]byte{typeInt}, bits...)
@@ -295,6 +295,17 @@ func ToBadgerType(val interface{}) ([]byte, error) {
 		ret := append([]byte{typeBytes}, v...)
 		return ret, nil
 	case []interface{}:
+		result := []byte{typeArray}
+		l := len(v)
+		for i := 0; i < l; i++ {
+			entry, err := ToBadgerType(v[i])
+			if err != nil {
+				return nil, err
+			}
+			result = append(append(result, writeVarint(uint64(len(entry)))...), entry...)
+		}
+		return result, nil
+	case []string:
 		result := []byte{typeArray}
 		l := len(v)
 		for i := 0; i < l; i++ {
