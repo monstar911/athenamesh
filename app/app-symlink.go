@@ -1,4 +1,7 @@
-package main
+package app
+
+// Manages the SymLink maps -- either the hardcoded pubkey symlinks or later chain-defined attribute-based symlinks
+// All updates to the store pass through here in order to determine whether a symlink needs to be adjusted with the change
 
 import (
 	"bytes"

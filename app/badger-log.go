@@ -1,4 +1,6 @@
-package main
+package app
+
+// Used to merge the Tendermint and Badger logging systems so they can be managed with a single logging system
 
 import (
 	"fmt"

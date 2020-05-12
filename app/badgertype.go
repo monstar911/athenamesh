@@ -1,4 +1,6 @@
-package main
+package app
+
+// Defines the encoding we use to convert a JSON-like "document" into a binary stream for the datastore
 
 import (
 	"encoding/binary"

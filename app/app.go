@@ -1,4 +1,6 @@
-package main
+package app
+
+// Implements the ABCI interface required to communicate with Tendermint
 
 import (
 	"bytes"
@@ -348,9 +350,9 @@ func (app *AthenaStoreApplication) Commit() abcitypes.ResponseCommit {
 		app.singleBlockEvent = nil
 	}
 	// if we're set to only run once then firstCycleComplete will be non-nil; signal that we've just completed a Commit
-	if firstCycleComplete != nil {
-		close(firstCycleComplete)
-		firstCycleComplete = nil
+	if FirstCycleComplete != nil {
+		close(FirstCycleComplete)
+		FirstCycleComplete = nil
 	}
 	return abcitypes.ResponseCommit{}
 }

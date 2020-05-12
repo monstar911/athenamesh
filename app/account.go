@@ -1,4 +1,7 @@
-package main
+package app
+
+// Defines the various types of accounts we support, where they appear in the KV store, and assists
+// in encoding/decoding the values for communicating either with the store or with the client
 
 import (
 	"encoding/base64"
