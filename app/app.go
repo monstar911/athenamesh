@@ -72,51 +72,6 @@ func (app *AthenaStoreApplication) InitChain(req abcitypes.RequestInitChain) abc
 			return err
 		}
 
-		// store the genesis parameters so we can regenerate them
-		genTime, err := req.Time.GobEncode()
-		if err != nil {
-			return err
-		}
-		err = app.setKey(txn, "mesh/genesis/time", genTime)
-		if err != nil {
-			return err
-		}
-		err = app.setKey(txn, "mesh/genesis/chain_id", req.ChainId)
-		if err != nil {
-			return err
-		}
-
-		// assemble an object describing consensus_parameters
-		srcConsensus := req.ConsensusParams
-		var consBlock = map[string]interface{}{
-			"MaxBytes": srcConsensus.Block.MaxBytes,
-			"MaxGas":   srcConsensus.Block.MaxGas,
-		}
-		var consEvidence = map[string]interface{}{
-			"MaxAgeNumBlocks": srcConsensus.Evidence.MaxAgeNumBlocks,
-			"MaxAgeDuration":  int64(srcConsensus.Evidence.MaxAgeDuration),
-		}
-		var consValidator = map[string]interface{}{
-			"PubKeyTypes": srcConsensus.Validator.PubKeyTypes,
-		}
-		var consensus = map[string]interface{}{"Block": consBlock, "Evidence": consEvidence, "Validator": consValidator}
-		err = app.setKey(txn, "mesh/genesis/consensus_params", consensus)
-		if err != nil {
-			return err
-		}
-
-		// assemble an object describing Validators
-		validators := make([]interface{}, len(req.Validators))
-		for idx, val := range req.Validators {
-			var pubKey = map[string]interface{}{"Type": val.PubKey.Type, "Data": val.PubKey.Data}
-			var encVal = map[string]interface{}{"PubKey": pubKey, "Power": val.Power}
-			validators[idx] = encVal
-		}
-		err = app.setKey(txn, "mesh/genesis/validators", consensus)
-		if err != nil {
-			return err
-		}
-
 		return nil
 	})
 	if err != nil {

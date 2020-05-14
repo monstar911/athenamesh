@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -64,13 +65,13 @@ func main() {
 	}
 
 	// start the tendermint node here, while prepping to shutdown properly
-	err = service.Start()
+	err = service.Start(context.Background())
 	if err != nil {
 		logger.Error(err.Error())
-		service.Stop()
+		service.Stop(context.Background())
 		os.Exit(1)
 	}
-	defer service.Stop()
+	defer service.Stop(context.Background())
 
 	switch mainAction {
 	case actionOnce:

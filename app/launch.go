@@ -3,6 +3,7 @@ package app
 // Manages a tendermint instance built around our ABCI application
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"path/filepath"
@@ -31,8 +32,8 @@ var FirstCycleComplete chan struct{}
 
 // Service describes a service that can be started and stopped
 type Service interface {
-	Start() error
-	Stop() error
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
 }
 
 // DoInit creates the necessary files to create a new tendermint chain
@@ -84,7 +85,10 @@ func DoInit(config *cfg.Config, logger tmlog.Logger) error {
 			GenesisTime:     tmtime.Now(),
 			ConsensusParams: types.DefaultConsensusParams(),
 		}
-		key := pv.GetPubKey()
+		key, err := pv.GetPubKey()
+		if err != nil {
+			return errors.Wrap(err, "failed to retrieve public key")
+		}
 		genDoc.Validators = []types.GenesisValidator{{
 			Address: key.Address(),
 			PubKey:  key,
@@ -200,7 +204,7 @@ func (node *tendermintFullNode) prepareNode() error {
 	return err
 }
 
-func (node *tendermintFullNode) Start() error {
+func (node *tendermintFullNode) Start(ctx context.Context) error {
 	var err error
 	node.db, err = badger.Open(*node.dbopt)
 	if err != nil {
@@ -208,7 +212,7 @@ func (node *tendermintFullNode) Start() error {
 	}
 	node.app.(*AthenaStoreApplication).db = node.db
 
-	err = node.Start()
+	err = node.node.Start()
 	if err != nil {
 		return errors.Wrap(err, "failed to launch tendermint node")
 	}
@@ -216,7 +220,7 @@ func (node *tendermintFullNode) Start() error {
 	return nil
 }
 
-func (node *tendermintFullNode) Stop() (err error) {
+func (node *tendermintFullNode) Stop(ctx context.Context) (err error) {
 
 	if node.node != nil {
 		err = node.node.Stop()
