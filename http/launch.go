@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/odysseus654/athenamesh/common"
+
 	rpchttp "github.com/tendermint/tendermint/rpc/client/http"
 )
 
-type WebService struct {
+type webService struct {
 	RPCPort int
 	Prefix  string
 	RPC     *rpchttp.HTTP
@@ -18,30 +20,24 @@ type WebService struct {
 }
 
 func webStub(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotImplemented)
-	w.Write([]byte("Not Implemented (stub)"))
+	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
 }
 
-func webError(w http.ResponseWriter, err error) {
-	w.WriteHeader(http.StatusInternalServerError)
-	w.Write([]byte(err.Error()))
-}
-
-func (serv *WebService) stationID(w http.ResponseWriter, r *http.Request) {
+func (serv *webService) stationID(w http.ResponseWriter, r *http.Request) {
 	batch := serv.RPC.NewBatch()
 	genesis, err := batch.Genesis()
 	if err != nil {
-		webError(w, err)
+		http.Error(w, "batch.Genesis: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	commit, err := batch.Commit(nil)
 	if err != nil {
-		webError(w, err)
+		http.Error(w, "batch.Commit: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	_, err = batch.Send()
 	if err != nil {
-		webError(w, err)
+		http.Error(w, "batch.Send: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -54,7 +50,7 @@ func (serv *WebService) stationID(w http.ResponseWriter, r *http.Request) {
 	var jsonResult []byte
 	jsonResult, err = json.Marshal(result)
 	if err != nil {
-		webError(w, err)
+		http.Error(w, "json.Marshal: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -63,7 +59,7 @@ func (serv *WebService) stationID(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonResult)
 }
 
-func (serv *WebService) userLogin(w http.ResponseWriter, r *http.Request) {
+func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 	/*
 		- POST:
 			- grant_type: password
@@ -73,25 +69,41 @@ func (serv *WebService) userLogin(w http.ResponseWriter, r *http.Request) {
 		- Reply:
 			- `{ "access_token": "ca620f2725125348bef97e86695a7305dcd673e0d66105da043eede61d97db51", "created_at": 1577222914, "expires_in": 2629746, "refresh_token": "22170448f7fe2ab8122fbefadabb58fad05d665485628084895565286b5af96d", "scope": "owner", "token_type": "Bearer" }`
 	*/
-	w.WriteHeader(http.StatusNotImplemented)
-	w.Write([]byte("Not Implemented (stub)"))
+	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
 }
 
-func (serv *WebService) userCreate(w http.ResponseWriter, r *http.Request) {
-	/*
-		- POST:
-			- grant_type: password
-			- username:   Awesome.Avatarname
-			- password:   supersecretpassword
-			- scope:      owner
-		- Reply:
-			- `{ "access_token": "ca620f2725125348bef97e86695a7305dcd673e0d66105da043eede61d97db51", "created_at": 1577222914, "expires_in": 2629746, "refresh_token": "22170448f7fe2ab8122fbefadabb58fad05d665485628084895565286b5af96d", "scope": "owner", "token_type": "Bearer" }`
-	*/
-	w.WriteHeader(http.StatusNotImplemented)
-	w.Write([]byte("Not Implemented (stub)"))
+func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "ParseForm: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	username := r.PostFormValue("username")
+	if username == "" {
+		http.Error(w, "Must specify a username", http.StatusBadRequest)
+	}
+	password := r.PostFormValue("password")
+	if password == "" {
+		http.Error(w, "Must specify a password", http.StatusBadRequest)
+	}
+	salt, privKey, err := GenerateFromPassword(password)
+	if err != nil {
+		http.Error(w, "GenerateFromPassword: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_ = username
+	_ = salt
+	_ = privKey
+
+	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
 }
 
-func (serv *WebService) prepareServer() error {
+func (serv *webService) prepareServer() error {
 	mux := http.NewServeMux()
 	serv.Mux = mux
 
@@ -120,7 +132,8 @@ func (serv *WebService) prepareServer() error {
 	return nil
 }
 
-func (serv *WebService) Start(ctx context.Context) error {
+// Start launching the web service
+func (serv *webService) Start(ctx context.Context) error {
 	var err error
 	serv.RPC, err = rpchttp.New(fmt.Sprintf("http://127.0.0.1:%d", serv.RPCPort), "/websocket")
 	if err != nil {
@@ -131,7 +144,8 @@ func (serv *WebService) Start(ctx context.Context) error {
 	return serv.Server.ListenAndServe()
 }
 
-func (serv *WebService) Stop(ctx context.Context) error {
+// Stop shuts down the web service
+func (serv *webService) Stop(ctx context.Context) error {
 	var err error
 	if serv.Server != nil {
 		err = serv.Server.Shutdown(ctx)
@@ -146,11 +160,12 @@ func (serv *WebService) Stop(ctx context.Context) error {
 	return err
 }
 
-func NewWebService(rpcPort int, prefix string) (serv *WebService, err error) {
-	serv = &WebService{
+// NewWebService creates and returns a new webservice
+func NewWebService(rpcPort int, prefix string) (common.Service, error) {
+	serv := &webService{
 		RPCPort: rpcPort,
 		Prefix:  prefix,
 	}
-	err = serv.prepareServer()
-	return
+	err := serv.prepareServer()
+	return serv, err
 }

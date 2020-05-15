@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/odysseus654/athenamesh/common"
+
 	"github.com/dgraph-io/badger"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
@@ -29,12 +31,6 @@ import (
 
 // FirstCycleComplete, if non-nil, will be closed when the next block is committed
 var FirstCycleComplete chan struct{}
-
-// Service describes a service that can be started and stopped
-type Service interface {
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
-}
 
 // DoInit creates the necessary files to create a new tendermint chain
 func DoInit(config *cfg.Config, logger tmlog.Logger) error {
@@ -240,7 +236,7 @@ func (node *tendermintFullNode) Stop(ctx context.Context) (err error) {
 }
 
 // NewFullNode creates and returns a tendermint node (implementing Service)
-func NewFullNode(config *cfg.Config, logger tmlog.Logger) (Service, error) {
+func NewFullNode(config *cfg.Config, logger tmlog.Logger) (common.Service, error) {
 	node := &tendermintFullNode{
 		config: config,
 		logger: logger,
