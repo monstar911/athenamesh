@@ -65,74 +65,65 @@ func verifySignature(pubKey []byte, message []byte, sig []byte) bool {
 	return ed25519.Verify(pubKey, message, sig)
 }
 
-func (app *AthenaStoreApplication) isAuth(pubKey ed25519.PublicKey) (*loginEntry, error) {
+func (app *AthenaStoreApplication) isAuth(txn *badger.Txn, pubKey ed25519.PublicKey) (*loginEntry, error) {
 
-	var login *loginEntry = nil
+	keyQuery := "keymap/" + base64.RawURLEncoding.EncodeToString(pubKey)
+	gKeyPath, err := GetBadgerVal(txn, keyQuery)
+	if err != nil {
+		return nil, err // error or no key found
+	}
+	if gKeyPath == nil {
+		return nil, nil // no key found
+	}
 
-	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here
-	err := app.db.View(func(txn *badger.Txn) error {
-		keyQuery := "keymap/" + base64.RawURLEncoding.EncodeToString(pubKey)
-		gKeyPath, err := GetBadgerVal(txn, keyQuery)
+	keyPath, ok := gKeyPath.(string)
+	if !ok {
+		return nil, fmt.Errorf("Unexpected key path %v while fetching from %s", gKeyPath, keyQuery)
+	}
+
+	login, parentPath := domainUserTypes.MatchFromPath(keyPath)
+	if login == nil {
+		return nil, fmt.Errorf("Unsupported key path %s while fetching from %s", keyPath, keyQuery)
+	}
+
+	err = login.queryAccountData(txn, keyPath, keyQuery)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(login.Pubkey) == 0 {
+		return nil, fmt.Errorf("Missing key path %s while fetching from %s", keyPath, keyQuery)
+	}
+	if !bytes.Equal(login.Pubkey, pubKey) {
+		return nil, fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
+			base64.RawURLEncoding.EncodeToString(pubKey),
+			base64.RawURLEncoding.EncodeToString(login.Pubkey))
+	}
+
+	if parentPath != "" {
+		if len(login.ParentSign) == 0 {
+			return nil, errors.New("Account is a child object but is missing a signature")
+		}
+
+		parentLogin, _ := domainUserTypes.MatchFromPath(parentPath)
+		if parentLogin == nil {
+			return nil, fmt.Errorf("Unsupported parent key path %s", parentPath)
+		}
+
+		login.Parent = parentLogin
+		err = parentLogin.queryAccountData(txn, parentPath, keyPath)
 		if err != nil {
-			return err // error or no key found
-		}
-		if gKeyPath == nil {
-			return nil // no key found
+			return nil, err
 		}
 
-		keyPath, ok := gKeyPath.(string)
-		if !ok {
-			return fmt.Errorf("Unexpected key path %v while fetching from %s", gKeyPath, keyQuery)
+		if len(parentLogin.Pubkey) == 0 {
+			return nil, fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
 		}
-
-		var parentPath string
-		login, parentPath = domainUserTypes.MatchFromPath(keyPath)
-		if login == nil {
-			return fmt.Errorf("Unsupported key path %s while fetching from %s", keyPath, keyQuery)
+		if !verifySignature(parentLogin.Pubkey, pubKey, login.ParentSign) {
+			return nil, errors.New("Account is a child object but its signature was failed by its parent")
 		}
-
-		err = login.queryAccountData(txn, keyPath, keyQuery)
-		if err != nil {
-			return err
-		}
-
-		if len(login.Pubkey) == 0 {
-			return fmt.Errorf("Missing key path %s while fetching from %s", keyPath, keyQuery)
-		}
-		if !bytes.Equal(login.Pubkey, pubKey) {
-			return fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
-				base64.RawURLEncoding.EncodeToString(pubKey),
-				base64.RawURLEncoding.EncodeToString(login.Pubkey))
-		}
-
-		if parentPath != "" {
-			if len(login.ParentSign) == 0 {
-				return errors.New("Account is a child object but is missing a signature")
-			}
-
-			parentLogin, _ := domainUserTypes.MatchFromPath(parentPath)
-			if parentLogin == nil {
-				return fmt.Errorf("Unsupported parent key path %s", parentPath)
-			}
-
-			login.Parent = parentLogin
-			err = parentLogin.queryAccountData(txn, parentPath, keyPath)
-			if err != nil {
-				return err
-			}
-
-			if len(parentLogin.Pubkey) == 0 {
-				return fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
-			}
-			if !verifySignature(parentLogin.Pubkey, pubKey, login.ParentSign) {
-				return errors.New("Account is a child object but its signature was failed by its parent")
-			}
-
-			return nil
-		}
-		return nil
-	})
-	return login, err
+	}
+	return login, nil
 }
 
 func (app *AthenaStoreApplication) createRootUser(txn *badger.Txn, pubkey []byte) error {
@@ -317,7 +308,7 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 	return 0, ""
 }
 
-func (app *AthenaStoreApplication) doQuery(key string, login *loginEntry) (code uint32, codeDescr string, response interface{}) {
+func (app *AthenaStoreApplication) doQuery(txn *badger.Txn, key string, login *loginEntry) (code uint32, codeDescr string, response interface{}) {
 	if login != nil {
 		canAccess, isAuthPath := app.canAccess(false, login, key)
 		if !canAccess {
@@ -330,7 +321,7 @@ func (app *AthenaStoreApplication) doQuery(key string, login *loginEntry) (code 
 			}
 
 			// retrieve the existing auth token (if there is one)
-			gAcctData, err := GetBadgerVal(app.currentBatch, key)
+			gAcctData, err := GetBadgerVal(txn, key)
 			if err != nil {
 				return ErrorUnexpected, err.Error(), nil
 			}
@@ -351,7 +342,7 @@ func (app *AthenaStoreApplication) doQuery(key string, login *loginEntry) (code 
 		}
 
 		// okay, this is a standard query that we are pemitted to retrieve
-		result, err := GetBadgerVal(app.currentBatch, key)
+		result, err := GetBadgerVal(txn, key)
 		if err != nil {
 			return ErrorUnexpected, err.Error(), nil
 		}
@@ -370,7 +361,7 @@ func (app *AthenaStoreApplication) doQuery(key string, login *loginEntry) (code 
 	}
 
 	// retrieve the existing auth token (if there is one)
-	gAcctData, err := GetBadgerVal(app.currentBatch, key)
+	gAcctData, err := GetBadgerVal(txn, key)
 	if err != nil {
 		return ErrorUnexpected, err.Error(), nil
 	}

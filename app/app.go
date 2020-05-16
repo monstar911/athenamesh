@@ -226,7 +226,7 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	user, err := app.isAuth(tx.Pkey)
+	user, err := app.isAuth(app.currentBatch, tx.Pkey)
 	if err != nil {
 		return abcitypes.ResponseDeliverTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
@@ -248,7 +248,7 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	user, err := app.isAuth(tx.Pkey)
+	user, err := app.isAuth(app.currentBatch, tx.Pkey)
 	if err != nil {
 		return abcitypes.ResponseCheckTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
@@ -276,18 +276,26 @@ func (app *AthenaStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.R
 	if code != 0 {
 		return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
 	}
-	var user *loginEntry
-	var err error
-	if pubKey != nil {
-		user, err = app.isAuth(pubKey)
-		if err != nil {
-			return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
-		}
-	}
-
 	var response interface{}
-	code, info, response = app.doQuery(req.Path, user)
+	err := app.db.View(func(txn *badger.Txn) error {
+		var user *loginEntry
+		var err error
+		if pubKey != nil {
+			user, err = app.isAuth(txn, pubKey)
+			if err != nil {
+				return err
+			}
+		}
 
+		code, info, response = app.doQuery(txn, req.Path, user)
+		return nil
+	})
+	if err != nil {
+		return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
+	}
+	if code != 0 {
+		return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
+	}
 	jsonValue, err := json.Marshal(response)
 	if err != nil {
 		return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
