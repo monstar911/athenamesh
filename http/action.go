@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -151,6 +152,7 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// retrieve the values from the user
 	email := r.PostFormValue("username")
 	if email == "" {
 		http.Error(w, "Must specify an email", http.StatusBadRequest)
@@ -160,13 +162,66 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Must specify a password", http.StatusBadRequest)
 	}
 
+	// try to query for the pubKey and salt from the mesh
 	emailHash := sha256.Sum256([]byte(email))
 	queryKey := fmt.Sprintf("users/email/%s:auth", base64.RawURLEncoding.EncodeToString(emailHash[:]))
-	result, err := serv.query(queryKey, nil)
+	genResult, err := serv.query(queryKey, nil)
 	if err != nil {
 		http.Error(w, "user query: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if genResult == nil {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	}
+	result, ok := genResult.(map[string]interface{})
+	if !ok {
+		http.Error(w, "user query returned non-map result", http.StatusInternalServerError)
+		return
+	}
+	genUserPubKey, ok := result["pubKey"]
+	if !ok {
+		http.Error(w, "user query missing pubKey attribute", http.StatusInternalServerError)
+		return
+	}
+	strUserPubKey, ok := genUserPubKey.(string)
+	if !ok {
+		http.Error(w, "user query has non-string pubKey attribute", http.StatusInternalServerError)
+		return
+	}
+	userPubKey, err := base64.RawURLEncoding.DecodeString(strUserPubKey)
+	if err != nil {
+		http.Error(w, "decoding user query pubKey attribute: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(userPubKey) != ed25519.PublicKeySize {
+		http.Error(w, "user query has pubkey with unexpected length", http.StatusInternalServerError)
+		return
+	}
+	genSalt, ok := result["salt"]
+	if !ok {
+		http.Error(w, "user query missing salt attribute", http.StatusInternalServerError)
+		return
+	}
+	strSalt, ok := genSalt.(string)
+	if !ok {
+		http.Error(w, "user query has non-string salt attribute", http.StatusInternalServerError)
+		return
+	}
+
+	// generate our public + private key
+	privKey, err := KeyFromPassword(strSalt, password)
+	if err != nil {
+		http.Error(w, "KeyFromPassword: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	pubKey := privKey[ed25519.PublicKeySize:]
+
+	if bytes.Compare(pubKey, userPubKey) != 0 {
+		http.Error(w, "Login failed", http.StatusUnauthorized)
+		return
+	}
+
 	/*
 		- POST:
 			- grant_type: password
@@ -189,6 +244,7 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// retrieve the values from the user
 	username := r.PostFormValue("username")
 	if username == "" {
 		http.Error(w, "Must specify a username", http.StatusBadRequest)
@@ -201,19 +257,20 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 	if password == "" {
 		http.Error(w, "Must specify a password", http.StatusBadRequest)
 	}
+
+	// generate our public + private key
 	salt, privKey, err := GenerateFromPassword(password)
 	if err != nil {
 		http.Error(w, "GenerateFromPassword: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
 	pubKey := base64.RawURLEncoding.EncodeToString(privKey[ed25519.PublicKeySize:])
 
+	// submit the createUser request to the mesh
 	createUserKey := map[string]interface{}{
 		"pubKey": pubKey,
 		"salt":   salt,
 	}
-
 	emailHash := sha256.Sum256([]byte(email))
 	createEmailKey := map[string]interface{}{
 		"hash": base64.RawURLEncoding.EncodeToString(emailHash[:]),
