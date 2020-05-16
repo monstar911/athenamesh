@@ -1,3 +1,4 @@
+//go:generate go run http/assets_generate.go
 package main
 
 import (
