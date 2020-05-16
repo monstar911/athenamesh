@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 )
@@ -71,6 +72,39 @@ func (serv *webService) broadcast(msg [][]interface{}, key ed25519.PrivateKey, b
 	return nil
 }
 
+func (serv *webService) query(path string, key ed25519.PrivateKey) (interface{}, error) {
+	if path == "" {
+		return nil, errors.New("empty path passed to query")
+	}
+
+	var sign []byte
+	if key != nil {
+		if len(key) != ed25519.PrivateKeySize {
+			return nil, errors.New("Key with the wrong length passed to query")
+		}
+		sign = ed25519.Sign(key, []byte(path))
+	}
+
+	result, err := serv.RPC.ABCIQuery(path, sign)
+	if err != nil {
+		return nil, err
+	}
+	if result.Response.Code != 0 {
+		return nil, errors.New(result.Response.Info)
+	}
+	if result.Response.Value == nil {
+		return nil, nil
+	}
+
+	var value interface{}
+	decoder := json.NewDecoder(strings.NewReader(string(result.Response.Value)))
+	decoder.UseNumber()
+	if err = decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
 func (serv *webService) stationID(w http.ResponseWriter, r *http.Request) {
 	batch := serv.RPC.NewBatch()
 	genesis, err := batch.Genesis()
@@ -119,11 +153,19 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 
 	email := r.PostFormValue("username")
 	if email == "" {
-		http.Error(w, "Must specify a email", http.StatusBadRequest)
+		http.Error(w, "Must specify an email", http.StatusBadRequest)
 	}
 	password := r.PostFormValue("password")
 	if password == "" {
 		http.Error(w, "Must specify a password", http.StatusBadRequest)
+	}
+
+	emailHash := sha256.Sum256([]byte(email))
+	queryKey := fmt.Sprintf("users/email/%s:auth", base64.RawURLEncoding.EncodeToString(emailHash[:]))
+	result, err := serv.query(queryKey, nil)
+	if err != nil {
+		http.Error(w, "user query: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 	/*
 		- POST:
@@ -167,12 +209,15 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 
 	pubKey := base64.RawURLEncoding.EncodeToString(privKey[ed25519.PublicKeySize:])
 
-	createUserKey := make(map[string]interface{})
-	createUserKey["pubKey"] = pubKey
-	createUserKey["salt"] = salt
+	createUserKey := map[string]interface{}{
+		"pubKey": pubKey,
+		"salt":   salt,
+	}
 
-	createEmailKey := make(map[string]interface{})
-	createEmailKey["hash"] = sha256.Sum256([]byte(email))
+	emailHash := sha256.Sum256([]byte(email))
+	createEmailKey := map[string]interface{}{
+		"hash": base64.RawURLEncoding.EncodeToString(emailHash[:]),
+	}
 
 	createUserTx := [][]interface{}{
 		[]interface{}{fmt.Sprintf("user/%s/auth", username), createUserKey},

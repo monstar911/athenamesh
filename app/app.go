@@ -54,6 +54,8 @@ const (
 	ErrorUnauth
 	// ErrorBadFormat has a request that is not readable
 	ErrorBadFormat
+	// ErrorNotFound has a request depending on a nonexistent path
+	ErrorNotFound
 )
 
 var _ abcitypes.Application = (*AthenaStoreApplication)(nil)

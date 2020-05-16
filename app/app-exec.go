@@ -193,8 +193,15 @@ func (app *AthenaStoreApplication) canAccess(forWrite bool, login *loginEntry, p
 
 func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
 	for _, keyValue := range tx.Msg {
+		key, err := resolveSymlinkPath(app.currentBatch, keyValue.key)
+		if err != nil {
+			return ErrorUnexpected, err.Error()
+		}
+		if key == "" {
+			return ErrorNotFound, fmt.Sprintf("Path %s could not be resolved", keyValue.key)
+		}
 		if login != nil {
-			canAccess, _ := app.canAccess(true, login, keyValue.key)
+			canAccess, _ := app.canAccess(true, login, key)
 			if !canAccess {
 				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", keyValue.key)
 			}
@@ -202,14 +209,14 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (cod
 			canAccess := false
 
 			// we need to special-case users creating a new user account, which would appear as a self-signed write to a nonexistent userAuth location
-			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(keyValue.key)
+			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
 			if userAuthPath != nil {
 				// attempt to decode the value into a login Entry
 				reqAcctData := &loginEntry{Type: userUserTypeConfig}
-				err := reqAcctData.decodeAccountData(valueAsMap, keyValue.key, true)
+				err := reqAcctData.decodeAccountData(valueAsMap, key, true)
 				if err == nil && reqAcctData.Name != "" && bytes.Equal(reqAcctData.Pubkey, tx.Pkey) {
 					// okay this is properly self-signed, if the user doesn't exist then we'll consider this a valid createUser request
-					if gAcctData, err := GetBadgerVal(app.currentBatch, keyValue.key); gAcctData != nil && err == nil {
+					if gAcctData, err := GetBadgerVal(app.currentBatch, key); gAcctData != nil && err == nil {
 						return ErrorUnauth, fmt.Sprintf("User %s already exists", userAuthPath[2])
 					}
 					canAccess = true
@@ -225,22 +232,30 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (cod
 
 func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
 	for _, keyValue := range tx.Msg {
+		key, err := resolveSymlinkPath(app.currentBatch, keyValue.key)
+		if err != nil {
+			return ErrorUnexpected, err.Error()
+		}
+		if key == "" {
+			return ErrorNotFound, fmt.Sprintf("Path %s could not be resolved", keyValue.key)
+		}
+
 		if login != nil {
-			canAccess, isAuthPath := app.canAccess(true, login, keyValue.key)
+			canAccess, isAuthPath := app.canAccess(true, login, key)
 			if !canAccess {
 				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", keyValue.key)
 			}
 			if isAuthPath {
-				reqAcctData, _ := domainUserTypes.MatchFromPath(keyValue.key)
+				reqAcctData, _ := domainUserTypes.MatchFromPath(key)
 				if reqAcctData == nil {
 					return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", keyValue.key)
 				}
 
 				// retrieve the existing auth token (if there is one)
-				if gAcctData, err := GetBadgerVal(app.currentBatch, keyValue.key); gAcctData != nil && err == nil {
+				if gAcctData, err := GetBadgerVal(app.currentBatch, key); gAcctData != nil && err == nil {
 					acctData, ok := gAcctData.(map[string]interface{})
 					if ok {
-						err = reqAcctData.decodeAccountData(acctData, keyValue.key, false)
+						err = reqAcctData.decodeAccountData(acctData, key, false)
 					}
 				}
 				// clean up the retrieved login information
@@ -254,7 +269,7 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 				if !ok {
 					return ErrorBadFormat, fmt.Sprintf("Attempt to change %s which is an auth key but the value is not a map", keyValue.key)
 				}
-				err := reqAcctData.decodeAccountData(acctData, keyValue.key, true)
+				err := reqAcctData.decodeAccountData(acctData, key, true)
 				if err != nil {
 					return ErrorBadFormat, err.Error()
 				}
@@ -279,17 +294,17 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 		} else if valueAsMap, ok := keyValue.value.(map[string]interface{}); ok {
 			// we need to special-case users creating a new user account, which would appear as a self-signed write to a nonexistent userAuth location
 			canAccess := false
-			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(keyValue.key)
+			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
 			if userAuthPath != nil {
 				// attempt to decode the value into a login Entry
 				reqAcctData := &loginEntry{
 					Type:    userUserTypeConfig,
 					Created: app.treeState.lastBlockHeight + 1,
 				}
-				err := reqAcctData.decodeAccountData(valueAsMap, keyValue.key, true)
+				err := reqAcctData.decodeAccountData(valueAsMap, key, true)
 				if err == nil && reqAcctData.Name != "" && bytes.Equal(reqAcctData.Pubkey, tx.Pkey) {
 					// okay this is properly self-signed, if the user doesn't exist then we'll consider this a valid createUser request
-					if gAcctData, err := GetBadgerVal(app.currentBatch, keyValue.key); gAcctData != nil && err == nil {
+					if gAcctData, err := GetBadgerVal(app.currentBatch, key); gAcctData != nil && err == nil {
 						return ErrorUnauth, fmt.Sprintf("User %s already exists", userAuthPath[2])
 					}
 					canAccess = true
@@ -300,7 +315,7 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 				return ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawURLEncoding.EncodeToString(tx.Pkey))
 			}
 		}
-		err := app.setKey(app.currentBatch, keyValue.key, keyValue.value)
+		err = app.setKey(app.currentBatch, key, keyValue.value)
 		if err != nil {
 			return ErrorUnexpected, err.Error()
 		}
@@ -309,19 +324,26 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 }
 
 func (app *AthenaStoreApplication) doQuery(txn *badger.Txn, key string, login *loginEntry) (code uint32, codeDescr string, response interface{}) {
+	fullKey, err := resolveSymlinkPath(txn, key)
+	if err != nil {
+		return ErrorUnexpected, err.Error(), nil
+	}
+	if fullKey == "" {
+		return ErrorOk, "", nil // no key value
+	}
 	if login != nil {
-		canAccess, isAuthPath := app.canAccess(false, login, key)
+		canAccess, isAuthPath := app.canAccess(false, login, fullKey)
 		if !canAccess {
 			return ErrorUnauth, fmt.Sprintf("Not authorized to read from %s", key), nil
 		}
 		if isAuthPath {
-			reqAcctData, _ := domainUserTypes.MatchFromPath(key)
+			reqAcctData, _ := domainUserTypes.MatchFromPath(fullKey)
 			if reqAcctData == nil {
 				return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", key), nil
 			}
 
 			// retrieve the existing auth token (if there is one)
-			gAcctData, err := GetBadgerVal(txn, key)
+			gAcctData, err := GetBadgerVal(txn, fullKey)
 			if err != nil {
 				return ErrorUnexpected, err.Error(), nil
 			}
@@ -332,7 +354,7 @@ func (app *AthenaStoreApplication) doQuery(txn *badger.Txn, key string, login *l
 			if !ok {
 				return ErrorUnexpected, fmt.Sprintf("Unexpected account object while fetching from %s", key), nil
 			}
-			err = reqAcctData.decodeAccountData(acctData, key, false)
+			err = reqAcctData.decodeAccountData(acctData, fullKey, false)
 			if err != nil {
 				return ErrorUnexpected, err.Error(), nil
 			}
@@ -342,7 +364,7 @@ func (app *AthenaStoreApplication) doQuery(txn *badger.Txn, key string, login *l
 		}
 
 		// okay, this is a standard query that we are pemitted to retrieve
-		result, err := GetBadgerVal(txn, key)
+		result, err := GetBadgerVal(txn, fullKey)
 		if err != nil {
 			return ErrorUnexpected, err.Error(), nil
 		}
@@ -350,18 +372,18 @@ func (app *AthenaStoreApplication) doQuery(txn *badger.Txn, key string, login *l
 	}
 
 	// we need to special-case users querying user account properties when trying to login
-	userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
+	userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(fullKey)
 	if userAuthPath == nil {
 		return ErrorUnauth, fmt.Sprintf("Query of %s requires a valid user", key), nil
 	}
 
-	reqAcctData, _ := domainUserTypes.MatchFromPath(key)
+	reqAcctData, _ := domainUserTypes.MatchFromPath(fullKey)
 	if reqAcctData == nil {
 		return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", key), nil
 	}
 
 	// retrieve the existing auth token (if there is one)
-	gAcctData, err := GetBadgerVal(txn, key)
+	gAcctData, err := GetBadgerVal(txn, fullKey)
 	if err != nil {
 		return ErrorUnexpected, err.Error(), nil
 	}
@@ -372,7 +394,7 @@ func (app *AthenaStoreApplication) doQuery(txn *badger.Txn, key string, login *l
 	if !ok {
 		return ErrorUnexpected, fmt.Sprintf("Unexpected account object while fetching from %s", key), nil
 	}
-	err = reqAcctData.decodeAccountData(acctData, key, false)
+	err = reqAcctData.decodeAccountData(acctData, fullKey, false)
 	if err != nil {
 		return ErrorUnexpected, err.Error(), nil
 	}
