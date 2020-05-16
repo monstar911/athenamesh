@@ -42,7 +42,7 @@ func webStub(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
 }
 
-func (serv *webService) broadcast(msg map[string]interface{}, key ed25519.PrivateKey, bcastType broadcastType) error {
+func (serv *webService) broadcast(msg [][]interface{}, key ed25519.PrivateKey, bcastType broadcastType) error {
 	if key == nil || msg != nil {
 		return errors.New("nil message or key passed to broadcast")
 	}
@@ -188,12 +188,12 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 	createUserKey["salt"] = salt
 
 	createEmailKey := make(map[string]interface{})
-	createEmailKey["email"] = email
 	createEmailKey["hash"] = sha256.Sum256([]byte(email))
 
-	createUserTx := make(map[string]interface{})
-	createUserTx[fmt.Sprintf("user/%s/auth", username)] = createUserKey
-	createUserTx[fmt.Sprintf("user/%s/email", username)] = createEmailKey
+	createUserTx := [][]interface{}{
+		[]interface{}{fmt.Sprintf("user/%s/auth", username), createUserKey},
+		[]interface{}{fmt.Sprintf("user/%s/email", username), createEmailKey},
+	}
 
 	err = serv.broadcast(createUserTx, privKey, bcastCommit)
 	if err != nil {

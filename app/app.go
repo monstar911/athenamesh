@@ -29,9 +29,14 @@ type AthenaStoreApplication struct {
 	singleBlockEvent chan<- struct{}
 }
 
+type keyValue struct {
+	key   string
+	value interface{}
+}
+
 type athenaTx struct {
 	Pkey ed25519.PublicKey
-	Msg  map[string]interface{}
+	Msg  []keyValue
 }
 
 const (
@@ -161,9 +166,33 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	if err := decoder.Decode(&json); err != nil {
 		return nil, ErrorBadFormat, err.Error()
 	}
-	var ok bool
-	if dec.Msg, ok = json.(map[string]interface{}); !ok {
-		return nil, ErrorBadFormat, "Transaction must not be a JSON literal"
+	if mapMsg, ok := json.(map[string]interface{}); ok {
+		// passing in a {key:value} map is permitted, let's unroll this into a tuple list
+		arrMsg := make([]keyValue, 0)
+		for key, value := range mapMsg {
+			arrMsg = append(arrMsg, keyValue{key: key, value: value})
+		}
+		dec.Msg = arrMsg
+	} else if tupleMsg, ok := json.([]interface{}); ok {
+		// passing in a [[key,value]] list is permitted, let's unroll this into a tuple list
+		arrMsg := make([]keyValue, 0)
+		for _, genTuple := range tupleMsg {
+			if tuple, ok := genTuple.([]interface{}); ok {
+				if len(tuple) != 2 {
+					return nil, ErrorBadFormat, "Transaction not in an expected format (found array but elements did not have two elements)"
+				}
+				key, ok := tuple[0].(string)
+				if !ok {
+					return nil, ErrorBadFormat, "Transaction not in an expected format (found array with tuples, but first element must be a string)"
+				}
+				arrMsg = append(arrMsg, keyValue{key: key, value: tuple[1]})
+			} else {
+				return nil, ErrorBadFormat, "Transaction not in an expected format (found array but elements must be tuples)"
+			}
+		}
+		dec.Msg = arrMsg
+	} else {
+		return nil, ErrorBadFormat, "Transaction not in an expected format"
 	}
 
 	return &dec, ErrorOk, ""

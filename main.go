@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/odysseus654/athenamesh/app"
+	"github.com/odysseus654/athenamesh/common"
 
 	cfg "github.com/tendermint/tendermint/config"
 	tmlog "github.com/tendermint/tendermint/libs/log"
@@ -27,7 +28,7 @@ func main() {
 	logger := tmlog.NewTMLogger(tmlog.NewSyncWriter(os.Stdout))
 
 	mainAction := actionNone
-	var service app.Service
+	var service common.Service
 	var err error
 	args := os.Args[1:]
 	if len(args) > 0 {

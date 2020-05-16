@@ -201,24 +201,24 @@ func (app *AthenaStoreApplication) canAccess(forWrite bool, login *loginEntry, p
 }
 
 func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
-	for key, value := range tx.Msg {
+	for _, keyValue := range tx.Msg {
 		if login != nil {
-			canAccess, _ := app.canAccess(true, login, key)
+			canAccess, _ := app.canAccess(true, login, keyValue.key)
 			if !canAccess {
-				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", key)
+				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", keyValue.key)
 			}
-		} else if valueAsMap, ok := value.(map[string]interface{}); ok {
+		} else if valueAsMap, ok := keyValue.value.(map[string]interface{}); ok {
 			canAccess := false
 
 			// we need to special-case users creating a new user account, which would appear as a self-signed write to a nonexistent userAuth location
-			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
+			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(keyValue.key)
 			if userAuthPath != nil {
 				// attempt to decode the value into a login Entry
 				reqAcctData := &loginEntry{Type: userUserTypeConfig}
-				err := reqAcctData.decodeAccountData(valueAsMap, key, true)
+				err := reqAcctData.decodeAccountData(valueAsMap, keyValue.key, true)
 				if err == nil && reqAcctData.Name != "" && bytes.Equal(reqAcctData.Pubkey, tx.Pkey) {
 					// okay this is properly self-signed, if the user doesn't exist then we'll consider this a valid createUser request
-					if gAcctData, err := GetBadgerVal(app.currentBatch, key); gAcctData != nil && err == nil {
+					if gAcctData, err := GetBadgerVal(app.currentBatch, keyValue.key); gAcctData != nil && err == nil {
 						return ErrorUnauth, fmt.Sprintf("User %s already exists", userAuthPath[2])
 					}
 					canAccess = true
@@ -233,23 +233,23 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (cod
 }
 
 func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
-	for key, value := range tx.Msg {
+	for _, keyValue := range tx.Msg {
 		if login != nil {
-			canAccess, isAuthPath := app.canAccess(true, login, key)
+			canAccess, isAuthPath := app.canAccess(true, login, keyValue.key)
 			if !canAccess {
-				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", key)
+				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", keyValue.key)
 			}
 			if isAuthPath {
-				reqAcctData, _ := domainUserTypes.MatchFromPath(key)
+				reqAcctData, _ := domainUserTypes.MatchFromPath(keyValue.key)
 				if reqAcctData == nil {
-					return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", key)
+					return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", keyValue.key)
 				}
 
 				// retrieve the existing auth token (if there is one)
-				if gAcctData, err := GetBadgerVal(app.currentBatch, key); gAcctData != nil && err == nil {
+				if gAcctData, err := GetBadgerVal(app.currentBatch, keyValue.key); gAcctData != nil && err == nil {
 					acctData, ok := gAcctData.(map[string]interface{})
 					if ok {
-						err = reqAcctData.decodeAccountData(acctData, key, false)
+						err = reqAcctData.decodeAccountData(acctData, keyValue.key, false)
 					}
 				}
 				// clean up the retrieved login information
@@ -259,11 +259,11 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 				}
 
 				// import the new auth data into this token
-				acctData, ok := value.(map[string]interface{})
+				acctData, ok := keyValue.value.(map[string]interface{})
 				if !ok {
-					return ErrorBadFormat, fmt.Sprintf("Attempt to change %s which is an auth key but the value is not a map", key)
+					return ErrorBadFormat, fmt.Sprintf("Attempt to change %s which is an auth key but the value is not a map", keyValue.key)
 				}
-				err := reqAcctData.decodeAccountData(acctData, key, true)
+				err := reqAcctData.decodeAccountData(acctData, keyValue.key, true)
 				if err != nil {
 					return ErrorBadFormat, err.Error()
 				}
@@ -283,33 +283,33 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 				}
 
 				// write it back out as a new value
-				value = reqAcctData.assembleAccountData()
+				keyValue.value = reqAcctData.assembleAccountData()
 			}
-		} else if valueAsMap, ok := value.(map[string]interface{}); ok {
+		} else if valueAsMap, ok := keyValue.value.(map[string]interface{}); ok {
 			// we need to special-case users creating a new user account, which would appear as a self-signed write to a nonexistent userAuth location
 			canAccess := false
-			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
+			userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(keyValue.key)
 			if userAuthPath != nil {
 				// attempt to decode the value into a login Entry
 				reqAcctData := &loginEntry{
 					Type:    userUserTypeConfig,
 					Created: app.treeState.lastBlockHeight + 1,
 				}
-				err := reqAcctData.decodeAccountData(valueAsMap, key, true)
+				err := reqAcctData.decodeAccountData(valueAsMap, keyValue.key, true)
 				if err == nil && reqAcctData.Name != "" && bytes.Equal(reqAcctData.Pubkey, tx.Pkey) {
 					// okay this is properly self-signed, if the user doesn't exist then we'll consider this a valid createUser request
-					if gAcctData, err := GetBadgerVal(app.currentBatch, key); gAcctData != nil && err == nil {
+					if gAcctData, err := GetBadgerVal(app.currentBatch, keyValue.key); gAcctData != nil && err == nil {
 						return ErrorUnauth, fmt.Sprintf("User %s already exists", userAuthPath[2])
 					}
 					canAccess = true
-					value = reqAcctData.assembleAccountData()
+					keyValue.value = reqAcctData.assembleAccountData()
 				}
 			}
 			if !canAccess {
 				return ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawURLEncoding.EncodeToString(tx.Pkey))
 			}
 		}
-		err := app.setKey(app.currentBatch, key, value)
+		err := app.setKey(app.currentBatch, keyValue.key, keyValue.value)
 		if err != nil {
 			return ErrorUnexpected, err.Error()
 		}
