@@ -3,7 +3,6 @@ package app
 // Implements the ABCI interface required to communicate with Tendermint
 
 import (
-	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -31,9 +30,8 @@ type AthenaStoreApplication struct {
 }
 
 type athenaTx struct {
-	Pkey []byte
-	Sign []byte
-	Msg  interface{}
+	Pkey ed25519.PublicKey
+	Msg  map[string]interface{}
 }
 
 const (
@@ -145,15 +143,12 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 	if len(tx) < 96 {
 		return nil, ErrorTxTooShort, "Tx too short"
 	}
-	var body []byte
-	if !bytes.Equal(tx[0:96], make([]byte, 96)) {
-		dec.Pkey = tx[0:32]
-		dec.Sign = tx[32:96]
+	dec.Pkey = tx[0:32]
+	sign := tx[32:96]
 
-		body = tx[96:]
-		if !ed25519.Verify(dec.Pkey, body, dec.Sign) {
-			return nil, ErrorTxBadSign, "Transaction signature invalid"
-		}
+	body := tx[96:]
+	if !ed25519.Verify(dec.Pkey, body, sign) {
+		return nil, ErrorTxBadSign, "Transaction signature invalid"
 	}
 
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
@@ -162,7 +157,33 @@ func (app *AthenaStoreApplication) unpackTx(tx []byte) (*athenaTx, uint32, strin
 		return nil, ErrorBadFormat, err.Error()
 	}
 
+	var json interface{}
+	if err := decoder.Decode(&json); err != nil {
+		return nil, ErrorBadFormat, err.Error()
+	}
+	var ok bool
+	if dec.Msg, ok = json.(map[string]interface{}); !ok {
+		return nil, ErrorBadFormat, "Transaction must not be a JSON literal"
+	}
+
 	return &dec, ErrorOk, ""
+}
+
+func (app *AthenaStoreApplication) unpackQuery(data []byte, path string) (ed25519.PublicKey, uint32, string) {
+	if data == nil {
+		return nil, ErrorOk, "" // no authentication
+	}
+	if len(data) != 96 {
+		return nil, ErrorTxTooShort, "Data is wrong length"
+	}
+	pubKey := data[0:32]
+	sign := data[32:96]
+
+	if !ed25519.Verify(pubKey, []byte(path), sign) {
+		return nil, ErrorTxBadSign, "Transaction signature invalid"
+	}
+
+	return pubKey, ErrorOk, ""
 }
 
 // SetOption Set non-consensus critical application specific options
@@ -176,19 +197,15 @@ func (app *AthenaStoreApplication) DeliverTx(req abcitypes.RequestDeliverTx) abc
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	msg, ok := tx.Msg.(map[string]interface{})
-	if !ok {
-		return abcitypes.ResponseDeliverTx{Code: ErrorBadFormat, Codespace: "athena", Info: "Transactions must be a valid JSON object"}
-	}
-	user, err := app.isAuth(tx)
+	user, err := app.isAuth(tx.Pkey)
 	if err != nil {
 		return abcitypes.ResponseDeliverTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
-	code, info = app.isValid(tx, msg, user)
+	code, info = app.isValid(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
-	code, info = app.executeTx(tx, msg, user)
+	code, info = app.executeTx(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseDeliverTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -202,15 +219,11 @@ func (app *AthenaStoreApplication) CheckTx(req abcitypes.RequestCheckTx) abcityp
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
-	msg, ok := tx.Msg.(map[string]interface{})
-	if !ok {
-		return abcitypes.ResponseCheckTx{Code: ErrorBadFormat, Codespace: "athena", Info: "Transactions must be a valid JSON object"}
-	}
-	user, err := app.isAuth(tx)
+	user, err := app.isAuth(tx.Pkey)
 	if err != nil {
 		return abcitypes.ResponseCheckTx{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
 	}
-	code, info = app.isValid(tx, msg, user)
+	code, info = app.isValid(tx, user)
 	if code != 0 {
 		return abcitypes.ResponseCheckTx{Code: code, Codespace: "athena", Info: info}
 	}
@@ -230,48 +243,21 @@ func (app *AthenaStoreApplication) updateLastBlockHeight(txn *badger.Txn) error 
 
 // Query Query for data from the application at current or past height
 func (app *AthenaStoreApplication) Query(req abcitypes.RequestQuery) abcitypes.ResponseQuery {
-	tx, code, info := app.unpackTx(req.Data)
+	pubKey, code, info := app.unpackQuery(req.Data, req.Path)
 	if code != 0 {
 		return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
 	}
-	user, err := app.isAuth(tx)
-	if err != nil {
-		return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
+	var user *loginEntry
+	var err error
+	if pubKey != nil {
+		user, err = app.isAuth(pubKey)
+		if err != nil {
+			return abcitypes.ResponseQuery{Code: ErrorUnexpected, Codespace: "athena", Info: err.Error()}
+		}
 	}
 
 	var response interface{}
-	switch msg := tx.Msg.(type) {
-	case string:
-		code, info, response = app.doQuery(tx, msg, user)
-	case []interface{}:
-		result := make(map[string]interface{})
-		var val interface{}
-		for _, gKey := range msg {
-			key, ok := gKey.(string)
-			if !ok {
-				return abcitypes.ResponseQuery{Code: ErrorBadFormat, Codespace: "athena", Info: "Queries must be a JSON string array or string literal"}
-			}
-			code, info, val = app.doQuery(tx, key, user)
-			if code != 0 {
-				return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
-			}
-			result[key] = val
-		}
-		response = result
-	case []string:
-		result := make(map[string]interface{})
-		var val interface{}
-		for _, key := range msg {
-			code, info, val = app.doQuery(tx, key, user)
-			if code != 0 {
-				return abcitypes.ResponseQuery{Code: code, Codespace: "athena", Info: info}
-			}
-			result[key] = val
-		}
-		response = result
-	default:
-		return abcitypes.ResponseQuery{Code: ErrorBadFormat, Codespace: "athena", Info: "Queries must be a JSON string array or string literal"}
-	}
+	code, info, response = app.doQuery(req.Path, user)
 
 	jsonValue, err := json.Marshal(response)
 	if err != nil {

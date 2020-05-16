@@ -65,16 +65,13 @@ func verifySignature(pubKey []byte, message []byte, sig []byte) bool {
 	return ed25519.Verify(pubKey, message, sig)
 }
 
-func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
+func (app *AthenaStoreApplication) isAuth(pubKey ed25519.PublicKey) (*loginEntry, error) {
 
-	if tx.Pkey == nil || tx.Sign == nil {
-		return nil, nil // no authentication provided
-	}
 	var login *loginEntry = nil
 
 	// Intentionally calling app.db.View rather than using any uncommitted transaction -- we want committed values here
 	err := app.db.View(func(txn *badger.Txn) error {
-		keyQuery := "keymap/" + base64.RawURLEncoding.EncodeToString(tx.Pkey)
+		keyQuery := "keymap/" + base64.RawURLEncoding.EncodeToString(pubKey)
 		gKeyPath, err := GetBadgerVal(txn, keyQuery)
 		if err != nil {
 			return err // error or no key found
@@ -102,9 +99,9 @@ func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 		if len(login.Pubkey) == 0 {
 			return fmt.Errorf("Missing key path %s while fetching from %s", keyPath, keyQuery)
 		}
-		if !bytes.Equal(login.Pubkey, tx.Pkey) {
+		if !bytes.Equal(login.Pubkey, pubKey) {
 			return fmt.Errorf("Pubkey mismatch: requested %s but resolved to %s",
-				base64.RawURLEncoding.EncodeToString(tx.Pkey),
+				base64.RawURLEncoding.EncodeToString(pubKey),
 				base64.RawURLEncoding.EncodeToString(login.Pubkey))
 		}
 
@@ -127,7 +124,7 @@ func (app *AthenaStoreApplication) isAuth(tx *athenaTx) (*loginEntry, error) {
 			if len(parentLogin.Pubkey) == 0 {
 				return fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
 			}
-			if !verifySignature(parentLogin.Pubkey, tx.Pkey, login.ParentSign) {
+			if !verifySignature(parentLogin.Pubkey, pubKey, login.ParentSign) {
 				return errors.New("Account is a child object but its signature was failed by its parent")
 			}
 
@@ -203,15 +200,13 @@ func (app *AthenaStoreApplication) canAccess(forWrite bool, login *loginEntry, p
 	return
 }
 
-func (app *AthenaStoreApplication) isValid(tx *athenaTx, msg map[string]interface{}, login *loginEntry) (code uint32, codeDescr string) {
-	for key, value := range msg {
+func (app *AthenaStoreApplication) isValid(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
+	for key, value := range tx.Msg {
 		if login != nil {
 			canAccess, _ := app.canAccess(true, login, key)
 			if !canAccess {
 				return ErrorUnauth, fmt.Sprintf("Not authorized to write to %s", key)
 			}
-		} else if tx.Pkey == nil || tx.Sign == nil {
-			return ErrorTxBadSign, "Transactions require a valid signature to be present"
 		} else if valueAsMap, ok := value.(map[string]interface{}); ok {
 			canAccess := false
 
@@ -237,8 +232,8 @@ func (app *AthenaStoreApplication) isValid(tx *athenaTx, msg map[string]interfac
 	return 0, ""
 }
 
-func (app *AthenaStoreApplication) executeTx(tx *athenaTx, msg map[string]interface{}, login *loginEntry) (code uint32, codeDescr string) {
-	for key, value := range msg {
+func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (code uint32, codeDescr string) {
+	for key, value := range tx.Msg {
 		if login != nil {
 			canAccess, isAuthPath := app.canAccess(true, login, key)
 			if !canAccess {
@@ -290,8 +285,6 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, msg map[string]interf
 				// write it back out as a new value
 				value = reqAcctData.assembleAccountData()
 			}
-		} else if tx.Pkey == nil || tx.Sign == nil {
-			return ErrorTxBadSign, "Transactions require a valid signature to be present"
 		} else if valueAsMap, ok := value.(map[string]interface{}); ok {
 			// we need to special-case users creating a new user account, which would appear as a self-signed write to a nonexistent userAuth location
 			canAccess := false
@@ -324,7 +317,7 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, msg map[string]interf
 	return 0, ""
 }
 
-func (app *AthenaStoreApplication) doQuery(tx *athenaTx, key string, login *loginEntry) (code uint32, codeDescr string, response interface{}) {
+func (app *AthenaStoreApplication) doQuery(key string, login *loginEntry) (code uint32, codeDescr string, response interface{}) {
 	if login != nil {
 		canAccess, isAuthPath := app.canAccess(false, login, key)
 		if !canAccess {
@@ -363,38 +356,41 @@ func (app *AthenaStoreApplication) doQuery(tx *athenaTx, key string, login *logi
 			return ErrorUnexpected, err.Error(), nil
 		}
 		return ErrorOk, "", result
-
-	} else if tx.Pkey == nil || tx.Sign == nil {
-		// we need to special-case users querying user account properties when trying to login
-		userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
-		if userAuthPath == nil {
-			return ErrorUnauth, fmt.Sprintf("Query of %s requires a valid user", key), nil
-		}
-
-		reqAcctData, _ := domainUserTypes.MatchFromPath(key)
-		if reqAcctData == nil {
-			return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", key), nil
-		}
-
-		// retrieve the existing auth token (if there is one)
-		gAcctData, err := GetBadgerVal(app.currentBatch, key)
-		if err != nil {
-			return ErrorUnexpected, err.Error(), nil
-		}
-		if gAcctData == nil {
-			return ErrorOk, "", nil // no key value
-		}
-		acctData, ok := gAcctData.(map[string]interface{})
-		if !ok {
-			return ErrorUnexpected, fmt.Sprintf("Unexpected account object while fetching from %s", key), nil
-		}
-		err = reqAcctData.decodeAccountData(acctData, key, false)
-		if err != nil {
-			return ErrorUnexpected, err.Error(), nil
-		}
-
-		// unauthenticated users can only retrieve the extended information
-		return ErrorOk, "", reqAcctData.Attrs
 	}
-	return ErrorUnknownUser, fmt.Sprintf("Did not recognize key %s", base64.RawURLEncoding.EncodeToString(tx.Pkey)), nil
+
+	// we need to special-case users querying user account properties when trying to login
+	userAuthPath := permPaths["userAuth"].PathPat.FindStringSubmatch(key)
+	if userAuthPath == nil {
+		return ErrorUnauth, fmt.Sprintf("Query of %s requires a valid user", key), nil
+	}
+
+	reqAcctData, _ := domainUserTypes.MatchFromPath(key)
+	if reqAcctData == nil {
+		return ErrorUnexpected, fmt.Sprintf("we're told that %s is an auth keypath but cannot resolve the token type?", key), nil
+	}
+
+	// retrieve the existing auth token (if there is one)
+	gAcctData, err := GetBadgerVal(app.currentBatch, key)
+	if err != nil {
+		return ErrorUnexpected, err.Error(), nil
+	}
+	if gAcctData == nil {
+		return ErrorOk, "", nil // no key value
+	}
+	acctData, ok := gAcctData.(map[string]interface{})
+	if !ok {
+		return ErrorUnexpected, fmt.Sprintf("Unexpected account object while fetching from %s", key), nil
+	}
+	err = reqAcctData.decodeAccountData(acctData, key, false)
+	if err != nil {
+		return ErrorUnexpected, err.Error(), nil
+	}
+
+	// unauthenticated users can only retrieve limited data
+	limitedData := &loginEntry{
+		Type:   reqAcctData.Type,
+		Pubkey: reqAcctData.Pubkey,
+		Attrs:  reqAcctData.Attrs,
+	}
+	return ErrorOk, "", limitedData.assembleAccountData()
 }

@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -123,6 +124,23 @@ func (serv *webService) stationID(w http.ResponseWriter, r *http.Request) {
 }
 
 func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "ParseForm: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	email := r.PostFormValue("username")
+	if email == "" {
+		http.Error(w, "Must specify a email", http.StatusBadRequest)
+	}
+	password := r.PostFormValue("password")
+	if password == "" {
+		http.Error(w, "Must specify a password", http.StatusBadRequest)
+	}
 	/*
 		- POST:
 			- grant_type: password
@@ -140,14 +158,18 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "ParseForm: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+
 	username := r.PostFormValue("username")
 	if username == "" {
 		http.Error(w, "Must specify a username", http.StatusBadRequest)
+	}
+	email := r.PostFormValue("email")
+	if email == "" {
+		http.Error(w, "Must specify an email", http.StatusBadRequest)
 	}
 	password := r.PostFormValue("password")
 	if password == "" {
@@ -165,10 +187,15 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 	createUserKey["pubKey"] = pubKey
 	createUserKey["salt"] = salt
 
+	createEmailKey := make(map[string]interface{})
+	createEmailKey["email"] = email
+	createEmailKey["hash"] = sha256.Sum256([]byte(email))
+
 	createUserTx := make(map[string]interface{})
 	createUserTx[fmt.Sprintf("user/%s/auth", username)] = createUserKey
+	createUserTx[fmt.Sprintf("user/%s/email", username)] = createEmailKey
 
-	err = serv.broadcast(createUserTx, privKey, bcastSync)
+	err = serv.broadcast(createUserTx, privKey, bcastCommit)
 	if err != nil {
 		http.Error(w, "broadcast: "+err.Error(), http.StatusInternalServerError)
 		return
