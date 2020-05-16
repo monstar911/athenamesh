@@ -2,13 +2,17 @@ package http
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/odysseus654/athenamesh/common"
 
 	rpchttp "github.com/tendermint/tendermint/rpc/client/http"
+	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 )
 
 type webService struct {
@@ -19,8 +23,67 @@ type webService struct {
 	Mux     *http.ServeMux
 }
 
+type broadcastType int
+
+const (
+	bcastAsync  broadcastType = iota // sends blindly without waiting for whether the message is formed properly
+	bcastSync                        // waits for CheckTx to ensure the message seems okay but does not wait for it to be made into a block
+	bcastCommit                      // waits for the message to be made into a block (do not use in production code)
+)
+
+type transaction struct {
+	pubKey    ed25519.PublicKey      // ed25519 public key, len=32
+	signature []byte                 // ed25519 signature, len=64
+	body      map[string]interface{} // encoded to JSON
+}
+
 func webStub(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
+}
+
+func (serv *webService) broadcast(msg map[string]interface{}, key ed25519.PrivateKey, bcastType broadcastType) error {
+	if key == nil || msg != nil {
+		return errors.New("nil message or key passed to broadcast")
+	}
+	if len(key) != ed25519.PrivateKeySize {
+		return errors.New("Key with the wrong length passed to broadcast")
+	}
+	jsonResult, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	sign := ed25519.Sign(key, jsonResult)
+	tx := append(append([]byte(key[ed25519.PublicKeySize:]), sign...), jsonResult...)
+
+	var result *ctypes.ResultBroadcastTx
+
+	switch bcastType {
+	case bcastAsync:
+		result, err = serv.RPC.BroadcastTxAsync(tx)
+	case bcastSync:
+		result, err = serv.RPC.BroadcastTxSync(tx)
+	case bcastCommit:
+		var resultCommit *ctypes.ResultBroadcastTxCommit
+		resultCommit, err = serv.RPC.BroadcastTxCommit(tx)
+		if err != nil {
+			return err
+		}
+		if resultCommit.DeliverTx.Code != 0 {
+			err = errors.New(resultCommit.DeliverTx.Info)
+		} else if resultCommit.CheckTx.Code != 0 {
+			err = errors.New(resultCommit.CheckTx.Info)
+		}
+	default:
+		err = errors.New("bad bcastType provided")
+	}
+	if err != nil {
+		return err
+	}
+	if result != nil && result.Code != 0 {
+		return errors.New(result.Log)
+	}
+
+	return nil
 }
 
 func (serv *webService) stationID(w http.ResponseWriter, r *http.Request) {
@@ -96,11 +159,22 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = username
-	_ = salt
-	_ = privKey
+	pubKey := base64.RawURLEncoding.EncodeToString(privKey[ed25519.PublicKeySize:])
 
-	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
+	createUserKey := make(map[string]interface{})
+	createUserKey["pubKey"] = pubKey
+	createUserKey["salt"] = salt
+
+	createUserTx := make(map[string]interface{})
+	createUserTx[fmt.Sprintf("user/%s/auth", username)] = createUserKey
+
+	err = serv.broadcast(createUserTx, privKey, bcastSync)
+	if err != nil {
+		http.Error(w, "broadcast: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	http.Error(w, "User created successfully", http.StatusOK)
 }
 
 func (serv *webService) prepareServer() error {
