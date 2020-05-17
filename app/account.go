@@ -13,21 +13,24 @@ import (
 )
 
 type userTypeConfig struct {
-	UsePassphrase bool
-	PathPat       *regexp.Regexp
-	ParentIdx     int
-	NameIdx       int
+	UsePassphrase bool           // true if this account uses a passphrase to identify itself (unused?)
+	PathPat       *regexp.Regexp // Identifies a user account from its path
+	ParentIdx     int            // regex grouping in PathPat that represents the path of its parent
+	NameIdx       int            // regex grouping in PathPat that represents the "name" of this account
+	TypeName      string         // keyword describing this type -- used as part of parent hashes
 }
 
 var rootUserTypeConfig = &userTypeConfig{
 	UsePassphrase: false,
 	PathPat:       regexp.MustCompile("^config/rootUser$"),
+	TypeName:      "root",
 }
 
 var userUserTypeConfig = &userTypeConfig{
 	UsePassphrase: true,
 	PathPat:       regexp.MustCompile("^user/([^/]+)$"),
 	NameIdx:       1,
+	TypeName:      "user",
 }
 
 var loginUserTypeConfig = &userTypeConfig{
@@ -35,6 +38,7 @@ var loginUserTypeConfig = &userTypeConfig{
 	PathPat:       regexp.MustCompile("^(user/[^/]+)/login/([^/]+)$"),
 	ParentIdx:     1,
 	NameIdx:       2,
+	TypeName:      "login",
 }
 
 var domainUserTypeConfig = &userTypeConfig{
@@ -42,6 +46,7 @@ var domainUserTypeConfig = &userTypeConfig{
 	PathPat:       regexp.MustCompile("^(user/[^/]+)/domain/([^/]+)$"),
 	ParentIdx:     1,
 	NameIdx:       2,
+	TypeName:      "domain",
 }
 
 type domainUserTypeStore struct {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	uuid "github.com/satori/go.uuid"
 	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 )
 
@@ -137,8 +138,8 @@ func (serv *webService) stationID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
 	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	w.Write(jsonResult)
 }
 
@@ -163,23 +164,23 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// try to query for the pubKey and salt from the mesh
-	emailHash := sha256.Sum256([]byte(email))
+	emailHash := sha256.Sum256([]byte(strings.ToLower(email)))
 	queryKey := fmt.Sprintf("users/email/%s:auth", base64.RawURLEncoding.EncodeToString(emailHash[:]))
-	genResult, err := serv.query(queryKey, nil)
+	genSaltResult, err := serv.query(queryKey, nil)
 	if err != nil {
 		http.Error(w, "user query: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if genResult == nil {
+	if genSaltResult == nil {
 		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
-	result, ok := genResult.(map[string]interface{})
+	saltResult, ok := genSaltResult.(map[string]interface{})
 	if !ok {
 		http.Error(w, "user query returned non-map result", http.StatusInternalServerError)
 		return
 	}
-	genUserPubKey, ok := result["pubKey"]
+	genUserPubKey, ok := saltResult["pubKey"]
 	if !ok {
 		http.Error(w, "user query missing pubKey attribute", http.StatusInternalServerError)
 		return
@@ -198,7 +199,7 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "user query has pubkey with unexpected length", http.StatusInternalServerError)
 		return
 	}
-	genSalt, ok := result["salt"]
+	genSalt, ok := saltResult["salt"]
 	if !ok {
 		http.Error(w, "user query missing salt attribute", http.StatusInternalServerError)
 		return
@@ -222,6 +223,45 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// create a new login token
+	tokenHash := base64.RawURLEncoding.EncodeToString(uuid.NewV4().Bytes())
+
+	tokenPubKey, tokenPrivKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		http.Error(w, "GenerateKey: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	toSign := []byte(fmt.Sprintf("login:%s", tokenPubKey))
+	parentSign := ed25519.Sign(privKey, toSign)
+
+	createTokenKey := map[string]interface{}{
+		"pubKey": base64.RawURLEncoding.EncodeToString(tokenPubKey),
+		"sign":   base64.RawURLEncoding.EncodeToString(parentSign),
+	}
+
+	tokenPath := fmt.Sprintf("users/email/%s:domain/%s/auth",
+		base64.RawURLEncoding.EncodeToString(emailHash[:]), tokenHash)
+	createTokenTx := [][]interface{}{
+		[]interface{}{tokenPath, createTokenKey},
+	}
+
+	err = serv.broadcast(createTokenTx, privKey, bcastSync)
+	if err != nil {
+		http.Error(w, "broadcast: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	result := map[string]string{
+		"access_token": base64.RawURLEncoding.EncodeToString(tokenPrivKey),
+	}
+
+	var jsonResult []byte
+	jsonResult, err = json.Marshal(result)
+	if err != nil {
+		http.Error(w, "json.Marshal: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	/*
 		- POST:
 			- grant_type: password
@@ -231,7 +271,10 @@ func (serv *webService) userLogin(w http.ResponseWriter, r *http.Request) {
 		- Reply:
 			- `{ "access_token": "ca620f2725125348bef97e86695a7305dcd673e0d66105da043eede61d97db51", "created_at": 1577222914, "expires_in": 2629746, "refresh_token": "22170448f7fe2ab8122fbefadabb58fad05d665485628084895565286b5af96d", "scope": "owner", "token_type": "Bearer" }`
 	*/
-	http.Error(w, "Not Implemented (stub)", http.StatusNotImplemented)
+
+	w.Header().Add("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, jsonResult)
 }
 
 func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +314,7 @@ func (serv *webService) userCreate(w http.ResponseWriter, r *http.Request) {
 		"pubKey": pubKey,
 		"salt":   salt,
 	}
-	emailHash := sha256.Sum256([]byte(email))
+	emailHash := sha256.Sum256([]byte(strings.ToLower(email)))
 	createEmailKey := map[string]interface{}{
 		"hash": base64.RawURLEncoding.EncodeToString(emailHash[:]),
 	}

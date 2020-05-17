@@ -119,7 +119,8 @@ func (app *AthenaStoreApplication) isAuth(txn *badger.Txn, pubKey ed25519.Public
 		if len(parentLogin.Pubkey) == 0 {
 			return nil, fmt.Errorf("Account object %s/auth missing pubKey", parentPath)
 		}
-		if !verifySignature(parentLogin.Pubkey, pubKey, login.ParentSign) {
+		toSign := []byte(fmt.Sprintf("%s:%s", login.Type.TypeName, login.Pubkey))
+		if !verifySignature(parentLogin.Pubkey, toSign, login.ParentSign) {
 			return nil, errors.New("Account is a child object but its signature was failed by its parent")
 		}
 	}
@@ -283,7 +284,8 @@ func (app *AthenaStoreApplication) executeTx(tx *athenaTx, login *loginEntry) (c
 					if len(parentLogin.Pubkey) == 0 {
 						return ErrorBadFormat, fmt.Sprintf("Account object %s/auth missing pubKey", parentPath)
 					}
-					if !verifySignature(parentLogin.Pubkey, reqAcctData.Pubkey, reqAcctData.ParentSign) {
+					toSign := []byte(fmt.Sprintf("%s:%s", reqAcctData.Type.TypeName, reqAcctData.Pubkey))
+					if !verifySignature(parentLogin.Pubkey, toSign, reqAcctData.ParentSign) {
 						return ErrorBadFormat, "Account is a child object but its signature was failed by its parent"
 					}
 				}
